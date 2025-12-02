@@ -479,7 +479,7 @@ class Plc4xClientDetailManager {
             'ADS': 'ADS',
             'BACNET_IP': 'BACnet/IP',
             'CANOPEN': 'CANopen',
-            'EIP': 'EtherNet/IP',
+            'ETHERNET_IP': 'EtherNet/IP',
             'FIRMATA': 'Firmata',
             'KNXNET_IP': 'KNXnet/IP',
             'MODBUS_ASCII': 'Modbus ASCII',
