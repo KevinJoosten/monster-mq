@@ -75,8 +75,9 @@ class SessionStoreSQLite(
             """.trimIndent())
             .add("""
             CREATE TABLE IF NOT EXISTS $queuedMessagesClientsTableName (
-                client_id TEXT,                
+                client_id TEXT,
                 message_uuid TEXT,
+                status INTEGER DEFAULT 0,
                 PRIMARY KEY (client_id, message_uuid)
             );
             """.trimIndent())
@@ -269,10 +270,10 @@ class SessionStoreSQLite(
 
     override fun addSubscriptions(subscriptions: List<MqttSubscription>) {
         if (subscriptions.isEmpty()) return
-        
+
         val sql = "INSERT INTO $subscriptionsTableName (client_id, topic, qos, wildcard) VALUES (?, ?, ?, ?) "+
                   "ON CONFLICT (client_id, topic) DO UPDATE SET qos = excluded.qos"
-        
+
         val batchParams = JsonArray()
         subscriptions.forEach { subscription ->
             val params = JsonArray()
@@ -282,7 +283,7 @@ class SessionStoreSQLite(
                 .add(isWildcardTopic(subscription.topicName))
             batchParams.add(params)
         }
-        
+
         sqlClient.executeBatch(sql, batchParams).onComplete { result ->
             if (result.failed()) {
                 logger.warning("Error adding subscriptions: ${result.cause()?.message}")
@@ -292,7 +293,7 @@ class SessionStoreSQLite(
 
     override fun delSubscriptions(subscriptions: List<MqttSubscription>) {
         if (subscriptions.isEmpty()) return
-        
+
         val sql = "DELETE FROM $subscriptionsTableName WHERE client_id = ? AND topic = ?"
         val batchParams = JsonArray()
         subscriptions.forEach { subscription ->
@@ -301,7 +302,7 @@ class SessionStoreSQLite(
                 .add(subscription.topicName)
             batchParams.add(params)
         }
-        
+
         sqlClient.executeBatch(sql, batchParams).onComplete { result ->
             if (result.failed()) {
                 logger.warning("Error deleting subscriptions: ${result.cause()?.message}")
@@ -353,8 +354,8 @@ class SessionStoreSQLite(
                                 VALUES (?, ?, ?, ?, ?, ?, ?)
                                 ON CONFLICT (message_uuid) DO NOTHING"""
         
-        val insertClientSql = """INSERT INTO $queuedMessagesClientsTableName (client_id, message_uuid) 
-                               VALUES (?, ?) ON CONFLICT DO NOTHING"""
+        val insertClientSql = """INSERT INTO $queuedMessagesClientsTableName (client_id, message_uuid, status)
+                               VALUES (?, ?, 0) ON CONFLICT DO NOTHING"""
         
         val messageBatch = JsonArray()
         val clientBatch = JsonArray()
@@ -442,15 +443,15 @@ class SessionStoreSQLite(
 
     override fun removeMessages(messages: List<Pair<String, String>>) {
         if (messages.isEmpty()) return
-        
+
         val deleteSql = "DELETE FROM $queuedMessagesClientsTableName WHERE client_id = ? AND message_uuid = ?"
         val batchParams = JsonArray()
-        
+
         messages.forEach { (clientId, messageUuid) ->
             val params = JsonArray().add(clientId).add(messageUuid)
             batchParams.add(params)
         }
-        
+
         sqlClient.executeBatch(deleteSql, batchParams).onComplete { result ->
             if (result.failed()) {
                 logger.warning("Error removing messages: ${result.cause()?.message}")
@@ -460,16 +461,141 @@ class SessionStoreSQLite(
         }
     }
 
+    override fun fetchNextPendingMessage(clientId: String): BrokerMessage? {
+        return fetchPendingMessages(clientId, 1).firstOrNull()
+    }
+
+    override fun fetchPendingMessages(clientId: String, limit: Int): List<BrokerMessage> {
+        val sql = """SELECT m.message_uuid, m.message_id, m.topic, m.payload, m.qos, m.retained, m.client_id
+                    FROM $queuedMessagesTableName m
+                    JOIN $queuedMessagesClientsTableName c ON m.message_uuid = c.message_uuid
+                    WHERE c.client_id = ? AND c.status = 0
+                    ORDER BY c.rowid
+                    LIMIT ?"""
+
+        val params = JsonArray().add(clientId).add(limit)
+
+        return try {
+            val results = sqlClient.executeQuerySync(sql, params)
+            val messages = mutableListOf<BrokerMessage>()
+            for (i in 0 until results.size()) {
+                val rowObj = results.getJsonObject(i)
+                messages.add(BrokerMessage(
+                    messageUuid = rowObj.getString("message_uuid"),
+                    messageId = rowObj.getInteger("message_id"),
+                    topicName = rowObj.getString("topic"),
+                    payload = rowObj.getBinary("payload") ?: ByteArray(0),
+                    qosLevel = rowObj.getInteger("qos"),
+                    isRetain = rowObj.getBoolean("retained", false),
+                    isDup = false,
+                    isQueued = true,
+                    clientId = rowObj.getString("client_id")
+                ))
+            }
+            messages
+        } catch (e: Exception) {
+            logger.warning("Error fetching pending messages: ${e.message}")
+            emptyList()
+        }
+    }
+
+    override fun markMessageInFlight(clientId: String, messageUuid: String) {
+        val sql = "UPDATE $queuedMessagesClientsTableName SET status = 1 WHERE client_id = ? AND message_uuid = ? AND status = 0"
+        val params = JsonArray().add(clientId).add(messageUuid)
+        try {
+            sqlClient.executeUpdateSync(sql, params)
+        } catch (e: Exception) {
+            logger.warning("Error marking message in-flight: ${e.message}")
+        }
+    }
+
+    override fun markMessagesInFlight(clientId: String, messageUuids: List<String>) {
+        if (messageUuids.isEmpty()) return
+        // SQLite doesn't support arrays, so we use batch updates
+        val sql = "UPDATE $queuedMessagesClientsTableName SET status = 1 WHERE client_id = ? AND message_uuid = ? AND status = 0"
+        val batchParams = JsonArray()
+        messageUuids.forEach { uuid ->
+            batchParams.add(JsonArray().add(clientId).add(uuid))
+        }
+        try {
+            sqlClient.executeBatch(sql, batchParams)
+        } catch (e: Exception) {
+            logger.warning("Error marking messages in-flight: ${e.message}")
+        }
+    }
+
+    override fun markMessageDelivered(clientId: String, messageUuid: String) {
+        val sql = "UPDATE $queuedMessagesClientsTableName SET status = 2 WHERE client_id = ? AND message_uuid = ?"
+        val params = JsonArray().add(clientId).add(messageUuid)
+        try {
+            sqlClient.executeUpdateSync(sql, params)
+        } catch (e: Exception) {
+            logger.warning("Error marking message delivered: ${e.message}")
+        }
+    }
+
+    override fun resetInFlightMessages(clientId: String) {
+        val sql = "UPDATE $queuedMessagesClientsTableName SET status = 0 WHERE client_id = ? AND status = 1"
+        val params = JsonArray().add(clientId)
+        try {
+            sqlClient.executeUpdateSync(sql, params)
+        } catch (e: Exception) {
+            logger.warning("Error resetting in-flight messages: ${e.message}")
+        }
+    }
+
+    override fun purgeDeliveredMessages(): Int {
+        val sql = "DELETE FROM $queuedMessagesClientsTableName WHERE status = 2"
+        return try {
+            sqlClient.executeUpdateSync(sql, JsonArray())
+        } catch (e: Exception) {
+            logger.warning("Error purging delivered messages: ${e.message}")
+            0
+        }
+    }
+
     override fun purgeQueuedMessages() {
-        val deleteSql = "DELETE FROM $queuedMessagesTableName"
-        sqlClient.executeUpdateAsync(deleteSql, JsonArray())
-        logger.fine { "Purged all queued messages" }
+        val startTime = System.currentTimeMillis()
+        // Delete only orphaned messages (not referenced by any client)
+        val deleteSql = """
+            DELETE FROM $queuedMessagesTableName
+            WHERE message_uuid NOT IN (
+                SELECT DISTINCT message_uuid FROM $queuedMessagesClientsTableName
+            )
+        """.trimIndent()
+        val deleted = sqlClient.executeUpdateSync(deleteSql, JsonArray())
+        val duration = (System.currentTimeMillis() - startTime) / 1000.0
+        if (deleted > 0) {
+            logger.info { "Purging queued messages finished: deleted $deleted orphaned messages in $duration seconds" }
+        } else {
+            logger.fine { "Purging queued messages finished: no orphaned messages found in $duration seconds" }
+        }
     }
 
     override fun purgeSessions() {
-        val deleteSql = "DELETE FROM $sessionsTableName WHERE connected = false"
-        sqlClient.executeUpdateAsync(deleteSql, JsonArray())
-        logger.fine { "Purged disconnected sessions" }
+        val startTime = System.currentTimeMillis()
+        // Delete clean sessions (consistent with PostgreSQL/CrateDB behavior)
+        sqlClient.executeUpdateSync(
+            "DELETE FROM $sessionsTableName WHERE clean_session = 1",
+            JsonArray()
+        )
+        // Delete orphaned subscriptions
+        sqlClient.executeUpdateSync(
+            """
+            DELETE FROM $subscriptionsTableName
+            WHERE client_id NOT IN (
+                SELECT client_id FROM $sessionsTableName
+            )
+            """.trimIndent(),
+            JsonArray()
+        )
+        // Mark all sessions as disconnected
+        sqlClient.executeUpdateSync(
+            "UPDATE $sessionsTableName SET connected = 0",
+            JsonArray()
+        )
+        val duration = (System.currentTimeMillis() - startTime) / 1000.0
+        logger.fine { "Purging sessions finished in $duration seconds" }
     }
     
     private fun isWildcardTopic(topicName: String): Boolean {
@@ -494,7 +620,7 @@ class SessionStoreSQLite(
     }
 
     override fun countQueuedMessagesForClient(clientId: String): Long {
-        val sql = "SELECT COUNT(*) FROM $queuedMessagesClientsTableName WHERE client_id = ?"
+        val sql = "SELECT COUNT(*) FROM $queuedMessagesClientsTableName WHERE client_id = ? AND status < 2"
         val params = JsonArray().add(clientId)
 
         return try {

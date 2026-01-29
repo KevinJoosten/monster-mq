@@ -283,8 +283,8 @@ class GraphQLServer(
                         logger.fine("OPC UA device store initialized successfully")
                         // Try to start health checks if available (for MongoDB and SQLite)
                         try {
-                            val method = store?.javaClass?.getMethod("startHealthChecks", Vertx::class.java)
-                            method?.invoke(store, vertx)
+                            val method = store.javaClass.getMethod("startHealthChecks", Vertx::class.java)
+                            method.invoke(store, vertx)
                         } catch (e: Exception) {
                             logger.finer("Health checks not available or already started for device store: ${e.message}")
                         }
@@ -353,8 +353,8 @@ class GraphQLServer(
         val flowQueries = deviceStore?.let { FlowQueries(vertx, it) }
         val flowMutations = deviceStore?.let { FlowMutations(vertx, it) }
 
-        // Initialize GenAI resolver
-        val genAiResolver = genAiProvider?.let { GenAiResolver(vertx, it) }
+        // Initialize GenAI resolver (with archiveHandler for topic analysis)
+        val genAiResolver = genAiProvider?.let { GenAiResolver(vertx, it, archiveHandler) }
 
         return RuntimeWiring.newRuntimeWiring()
             // Register scalar types
@@ -381,6 +381,7 @@ class GraphQLServer(
                     .dataFetcher("retainedMessage", queryResolver.retainedMessage())
                     .dataFetcher("retainedMessages", queryResolver.retainedMessages())
                     .dataFetcher("archivedMessages", queryResolver.archivedMessages())
+                    .dataFetcher("aggregatedMessages", queryResolver.aggregatedMessages())
                     .dataFetcher("systemLogs", queryResolver.systemLogs())
                     .dataFetcher("searchTopics", queryResolver.searchTopics())
                     .dataFetcher("browseTopics", queryResolver.browseTopics())
@@ -481,6 +482,7 @@ class GraphQLServer(
                 builder.apply {
                     genAiResolver?.let { resolver ->
                         dataFetcher("generate", resolver.generate())
+                        dataFetcher("analyzeTopics", resolver.analyzeTopics())
                     }
                 }
             }

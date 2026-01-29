@@ -12,6 +12,9 @@ class LoginManager {
     }
 
     init() {
+        // Clear any stale session data from previous sessions
+        sessionStorage.clear();
+
         if (this.isLoggedIn()) {
             window.location.href = '/pages/dashboard.html';
             return;
@@ -57,10 +60,10 @@ class LoginManager {
 
     autoLoginDisabled() {
         // Auto-login when user management is disabled
-        localStorage.setItem('monstermq_token', 'null');
-        localStorage.setItem('monstermq_username', 'Anonymous');
-        localStorage.setItem('monstermq_isAdmin', 'false');
-        localStorage.setItem('monstermq_userManagementEnabled', 'false');
+        safeStorage.setItem('monstermq_token', 'null');
+        safeStorage.setItem('monstermq_username', 'Anonymous');
+        safeStorage.setItem('monstermq_isAdmin', 'false');
+        safeStorage.setItem('monstermq_userManagementEnabled', 'false');
 
         // Show success message and redirect
         this.showAlert('Authentication disabled - accessing dashboard...', 'success');
@@ -71,7 +74,7 @@ class LoginManager {
     }
 
     isLoggedIn() {
-        const token = localStorage.getItem('monstermq_token');
+        const token = safeStorage.getItem('monstermq_token');
         if (!token) return false;
 
         // If token is 'null', authentication is disabled
@@ -170,10 +173,10 @@ class LoginManager {
             if (result.success) {
                 // Handle case where authentication is disabled (token is null)
                 const token = result.token || 'null';
-                localStorage.setItem('monstermq_token', token);
-                localStorage.setItem('monstermq_username', result.username);
-                localStorage.setItem('monstermq_isAdmin', result.isAdmin);
-                localStorage.setItem('monstermq_userManagementEnabled', 'true');
+                safeStorage.setItem('monstermq_token', token);
+                safeStorage.setItem('monstermq_username', result.username);
+                safeStorage.setItem('monstermq_isAdmin', result.isAdmin);
+                safeStorage.setItem('monstermq_userManagementEnabled', 'true');
 
                 if (result.token === null) {
                     this.showAlert('Authentication disabled - accessing dashboard...', 'success');

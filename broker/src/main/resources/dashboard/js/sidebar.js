@@ -18,12 +18,29 @@ class SidebarManager {
     }
 
     init() {
+        this.injectFavicons();
         this.renderMenu();
         this.setupUI();
         this.restoreSidebarState();
         this.restoreSidebarScroll();
         this.setActiveNavItem();
         this.setupEventListeners();
+    }
+
+    injectFavicons() {
+        const favicons = [
+            { rel: 'icon', type: 'image/x-icon', href: '/favicon.ico' },
+            { rel: 'icon', type: 'image/png', sizes: '32x32', href: '/favicon-32x32.png' },
+            { rel: 'icon', type: 'image/png', sizes: '16x16', href: '/favicon-16x16.png' },
+            { rel: 'apple-touch-icon', sizes: '180x180', href: '/apple-touch-icon.png' }
+        ];
+        favicons.forEach(f => {
+            if (!document.querySelector(`link[href="${f.href}"]`)) {
+                const link = document.createElement('link');
+                Object.entries(f).forEach(([k, v]) => link.setAttribute(k, v));
+                document.head.appendChild(link);
+            }
+        });
     }
 
     renderMenu() {
@@ -44,7 +61,12 @@ class SidebarManager {
                     {
                         href: '/pages/topic-browser.html',
                         icon: '<circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path>',
-                        text: 'Topics'
+                        text: 'Browser'
+                    },
+                    {
+                        href: '/pages/topic-chart.html',
+                        icon: '<path d="M3 3v18h18"></path><path d="M18 17V9"></path><path d="M13 17V5"></path><path d="M8 17v-3"></path>',
+                        text: 'Visualizer'
                     }
                 ]
             },
@@ -180,8 +202,8 @@ class SidebarManager {
 
     setupUI() {
         // Check authentication and show/hide admin features
-        const isAdmin = localStorage.getItem('monstermq_isAdmin') === 'true';
-        const userManagementEnabled = localStorage.getItem('monstermq_userManagementEnabled') === 'true';
+        const isAdmin = safeStorage.getItem('monstermq_isAdmin') === 'true';
+        const userManagementEnabled = safeStorage.getItem('monstermq_userManagementEnabled') === 'true';
 
         // Show Users menu for admins (regardless of user management enabled status)
         const usersNavLink = document.getElementById('users-nav-link');
@@ -206,7 +228,7 @@ class SidebarManager {
     }
 
     restoreSidebarState() {
-        const isCollapsed = localStorage.getItem('monstermq_sidebar_collapsed') === 'true';
+        const isCollapsed = safeStorage.getItem('monstermq_sidebar_collapsed') === 'true';
         if (isCollapsed) {
             const sidebar = document.getElementById('sidebar');
             const mainContent = document.getElementById('main-content');
@@ -218,7 +240,7 @@ class SidebarManager {
     }
 
     restoreSidebarScroll() {
-        const savedScroll = localStorage.getItem('monstermq_sidebar_scroll');
+        const savedScroll = safeStorage.getItem('monstermq_sidebar_scroll');
         if (savedScroll) {
             const sidebarNav = document.getElementById('sidebar-nav');
             if (sidebarNav) {
@@ -253,7 +275,7 @@ class SidebarManager {
                 e.stopPropagation();
                 const sidebarNav = document.getElementById('sidebar-nav');
                 if (sidebarNav) {
-                    localStorage.setItem('monstermq_sidebar_scroll', sidebarNav.scrollTop.toString());
+                    safeStorage.setItem('monstermq_sidebar_scroll', sidebarNav.scrollTop.toString());
                 }
             });
         });
@@ -291,15 +313,23 @@ class SidebarManager {
     }
 
     logout() {
-        localStorage.removeItem('monstermq_token');
-        localStorage.removeItem('monstermq_username');
-        localStorage.removeItem('monstermq_isAdmin');
+        // Stop token expiration check
+        if (window.graphqlClient) {
+            window.graphqlClient.stopTokenExpirationCheck();
+        }
+
+        // Clear all auth data
+        safeStorage.removeItem('monstermq_token');
+        safeStorage.removeItem('monstermq_username');
+        safeStorage.removeItem('monstermq_isAdmin');
+        sessionStorage.clear();
+
         window.location.href = '/pages/login.html';
     }
 }
 
 // Global sidebar toggle function
-window.toggleSidebar = function() {
+window.toggleSidebar = function () {
     const sidebar = document.getElementById('sidebar');
     const mainContent = document.getElementById('main-content');
 
@@ -313,7 +343,7 @@ window.toggleSidebar = function() {
 
         // Save the collapsed state to localStorage
         const isCollapsed = sidebar.classList.contains('collapsed');
-        localStorage.setItem('monstermq_sidebar_collapsed', isCollapsed.toString());
+        safeStorage.setItem('monstermq_sidebar_collapsed', isCollapsed.toString());
     }
 
     // Dispatch event so log viewer can update its margin
@@ -323,7 +353,7 @@ window.toggleSidebar = function() {
 // Initialize sidebar when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
     new SidebarManager();
-    
+
     // Inject global Log Viewer on all authenticated pages (exclude login page)
     if (!window.location.pathname.endsWith('/pages/login.html')) {
         // Ensure container exists
@@ -375,7 +405,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // Helper to run code when log viewer is ready
-window.onLogViewerReady = function(callback) {
+window.onLogViewerReady = function (callback) {
     if (window.__monsterMQLogViewer) {
         callback(window.__monsterMQLogViewer);
     } else {

@@ -53,7 +53,9 @@ class SessionStoreMongoDB(
             sessionsCollection.createIndex(Document("client_id", 1))
             subscriptionsCollection.createIndex(Document("client_id", 1).append("topic", 1))
             queuedMessagesCollection.createIndex(Document("client_id", 1))
+            queuedMessagesCollection.createIndex(Document("message_uuid", 1))  // For $lookup joins
             queuedMessagesClientsCollection.createIndex(Document("client_id", 1))
+            queuedMessagesClientsCollection.createIndex(Document("client_id", 1).append("status", 1))
 
             logger.fine("MongoDB connection established successfully.")
             startPromise.complete()
@@ -302,7 +304,8 @@ class SessionStoreMongoDB(
                 clientIds.forEach { clientId ->
                     val clientMessageDocument = Document(mapOf(
                         "client_id" to clientId,
-                        "message_uuid" to message.messageUuid
+                        "message_uuid" to message.messageUuid,
+                        "status" to 0
                     ))
                     queuedMessagesClientsCollection.updateOne(
                         and(
@@ -382,20 +385,164 @@ class SessionStoreMongoDB(
         }
     }
 
-    override fun purgeQueuedMessages() {
-        try {
-            val startTime = System.currentTimeMillis()
-            val unusedMessagesFilter = Document("\$expr", Document(
-                "\$not", Document(
-                    "\$in", listOf("\$message_uuid",
-                        queuedMessagesClientsCollection.distinct("message_uuid", String::class.java).into(mutableListOf())
+    override fun fetchNextPendingMessage(clientId: String): BrokerMessage? {
+        return fetchPendingMessages(clientId, 1).firstOrNull()
+    }
+
+    override fun fetchPendingMessages(clientId: String, limit: Int): List<BrokerMessage> {
+        return try {
+            val pipeline = listOf(
+                Document("\$match", Document(mapOf("client_id" to clientId, "status" to 0))),
+                Document(
+                    "\$lookup", Document(mapOf(
+                        "from" to "queuedmessages",
+                        "localField" to "message_uuid",
+                        "foreignField" to "message_uuid",
+                        "as" to "message"
+                    ))
+                ),
+                Document("\$unwind", "\$message"),
+                Document("\$sort", Document("message.message_uuid", 1)),
+                Document("\$limit", limit)
+            )
+
+            val results = queuedMessagesClientsCollection.aggregate(pipeline)
+            results.mapNotNull { doc ->
+                val messageDoc = doc.get("message", Document::class.java)
+                if (messageDoc != null) {
+                    BrokerMessage(
+                        messageUuid = messageDoc.getString("message_uuid"),
+                        messageId = messageDoc.getInteger("message_id"),
+                        topicName = messageDoc.getString("topic"),
+                        payload = messageDoc.get("payload", Binary::class.java).data,
+                        qosLevel = messageDoc.getInteger("qos"),
+                        isRetain = messageDoc.getBoolean("retained"),
+                        isDup = false,
+                        isQueued = true,
+                        clientId = messageDoc.getString("client_id")
                     )
-                )
-            ))
-            val deleteResult = queuedMessagesCollection.deleteMany(unusedMessagesFilter)
-            val endTime = System.currentTimeMillis()
-            val duration = (endTime - startTime) / 1000.0
-            logger.info("Purging queued messages finished in $duration seconds. Deleted ${deleteResult.deletedCount} messages.")
+                } else null
+            }.toList()
+        } catch (e: Exception) {
+            logger.warning("Error fetching pending messages: ${e.message}")
+            emptyList()
+        }
+    }
+
+    override fun markMessageInFlight(clientId: String, messageUuid: String) {
+        try {
+            queuedMessagesClientsCollection.updateOne(
+                and(
+                    eq("client_id", clientId),
+                    eq("message_uuid", messageUuid),
+                    eq("status", 0)
+                ),
+                Document("\$set", Document("status", 1))
+            )
+        } catch (e: Exception) {
+            logger.warning("Error marking message in-flight: ${e.message}")
+        }
+    }
+
+    override fun markMessagesInFlight(clientId: String, messageUuids: List<String>) {
+        if (messageUuids.isEmpty()) return
+        try {
+            queuedMessagesClientsCollection.updateMany(
+                and(
+                    eq("client_id", clientId),
+                    `in`("message_uuid", messageUuids),
+                    eq("status", 0)
+                ),
+                Document("\$set", Document("status", 1))
+            )
+        } catch (e: Exception) {
+            logger.warning("Error marking messages in-flight: ${e.message}")
+        }
+    }
+
+    override fun markMessageDelivered(clientId: String, messageUuid: String) {
+        try {
+            queuedMessagesClientsCollection.updateOne(
+                and(
+                    eq("client_id", clientId),
+                    eq("message_uuid", messageUuid)
+                ),
+                Document("\$set", Document("status", 2))
+            )
+        } catch (e: Exception) {
+            logger.warning("Error marking message delivered: ${e.message}")
+        }
+    }
+
+    override fun resetInFlightMessages(clientId: String) {
+        try {
+            queuedMessagesClientsCollection.updateMany(
+                and(
+                    eq("client_id", clientId),
+                    eq("status", 1)
+                ),
+                Document("\$set", Document("status", 0))
+            )
+        } catch (e: Exception) {
+            logger.warning("Error resetting in-flight messages: ${e.message}")
+        }
+    }
+
+    override fun purgeDeliveredMessages(): Int {
+        return try {
+            val result = queuedMessagesClientsCollection.deleteMany(eq("status", 2))
+            result.deletedCount.toInt()
+        } catch (e: Exception) {
+            logger.warning("Error purging delivered messages: ${e.message}")
+            0
+        }
+    }
+
+    override fun purgeQueuedMessages() {
+        val batchSize = 5000
+        val delayBetweenBatchesMs = 100L
+        var totalDeleted = 0L
+        val startTime = System.currentTimeMillis()
+
+        try {
+            // Use batched aggregation with $lookup to find orphaned messages
+            // This avoids loading all UUIDs into memory at once
+            var deleted: Long
+            do {
+                // Find orphaned message UUIDs in batches using $lookup
+                val orphanedUuids = queuedMessagesCollection.aggregate(listOf(
+                    Document("\$lookup", Document(mapOf(
+                        "from" to "queuedmessagesclients",
+                        "localField" to "message_uuid",
+                        "foreignField" to "message_uuid",
+                        "as" to "clients"
+                    ))),
+                    Document("\$match", Document("clients", Document("\$size", 0))),
+                    Document("\$limit", batchSize),
+                    Document("\$project", Document("message_uuid", 1))
+                )).map { it.getString("message_uuid") }.toList()
+
+                if (orphanedUuids.isNotEmpty()) {
+                    val result = queuedMessagesCollection.deleteMany(`in`("message_uuid", orphanedUuids))
+                    deleted = result.deletedCount
+                    totalDeleted += deleted
+
+                    logger.fine { "Purge batch: deleted $deleted orphaned messages (total: $totalDeleted)" }
+
+                    if (deleted >= batchSize) {
+                        Thread.sleep(delayBetweenBatchesMs)
+                    }
+                } else {
+                    deleted = 0
+                }
+            } while (deleted >= batchSize)
+
+            val duration = (System.currentTimeMillis() - startTime) / 1000.0
+            if (totalDeleted > 0) {
+                logger.info("Purging queued messages finished: deleted $totalDeleted in $duration seconds")
+            } else {
+                logger.fine { "Purging queued messages finished: no orphaned messages found in $duration seconds" }
+            }
         } catch (e: Exception) {
             logger.warning("Error while purging queued messages: ${e.message}")
         }
@@ -404,23 +551,35 @@ class SessionStoreMongoDB(
     override fun purgeSessions() {
         try {
             val startTime = System.currentTimeMillis()
-            sessionsCollection.deleteMany(eq("clean_session", true))
-            subscriptionsCollection.deleteMany(
-                Document("\$expr", Document(
-                    "\$not", Document(
-                        "\$in", listOf("\$client_id", sessionsCollection.distinct("client_id", String::class.java).into(mutableListOf()))
-                    )
-                ))
-            )
 
+            // Delete clean sessions
+            sessionsCollection.deleteMany(eq("clean_session", true))
+
+            // Delete orphaned subscriptions using $lookup aggregation
+            // This avoids loading all client_ids into memory
+            val orphanedClientIds = subscriptionsCollection.aggregate(listOf(
+                Document("\$lookup", Document(mapOf(
+                    "from" to "sessions",
+                    "localField" to "client_id",
+                    "foreignField" to "client_id",
+                    "as" to "session"
+                ))),
+                Document("\$match", Document("session", Document("\$size", 0))),
+                Document("\$project", Document("client_id", 1))
+            )).map { it.getString("client_id") }.toList()
+
+            if (orphanedClientIds.isNotEmpty()) {
+                subscriptionsCollection.deleteMany(`in`("client_id", orphanedClientIds))
+            }
+
+            // Mark all sessions as disconnected
             sessionsCollection.updateMany(
                 Document(),
                 Document("\$set", Document("connected", false))
             )
 
-            val endTime = System.currentTimeMillis()
-            val duration = (endTime - startTime) / 1000.0
-            logger.info("Purging sessions finished in $duration seconds.")
+            val duration = (System.currentTimeMillis() - startTime) / 1000.0
+            logger.fine { "Purging sessions finished in $duration seconds" }
         } catch (e: Exception) {
             logger.warning("Error while purging sessions: ${e.message}")
         }
@@ -442,7 +601,7 @@ class SessionStoreMongoDB(
 
     override fun countQueuedMessagesForClient(clientId: String): Long {
         return try {
-            queuedMessagesClientsCollection.countDocuments(eq("client_id", clientId))
+            queuedMessagesClientsCollection.countDocuments(and(eq("client_id", clientId), lt("status", 2)))
         } catch (e: Exception) {
             logger.warning("Error counting queued messages for client $clientId: ${e.message}")
             0L

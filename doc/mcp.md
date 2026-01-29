@@ -29,21 +29,14 @@ ArchiveGroups:
 
 ### Connect with Claude Desktop
 
-Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+MonsterMQ's MCP server uses HTTP transport (Streamable HTTP). Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "monstermq": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-monstermq"
-      ],
-      "env": {
-        "MCP_PORT": "3000",
-        "MCP_HOST": "localhost"
-      }
+      "type": "url",
+      "url": "http://localhost:3000/mcp"
     }
   }
 }
@@ -51,13 +44,79 @@ Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_deskt
 
 ### Direct MCP Connection
 
-```bash
-# Using MCP CLI
-mcp connect http://localhost:3000
+The MCP server endpoint is available at `http://<host>:<port>/mcp`:
 
-# Using WebSocket
-wscat -c ws://localhost:3000/mcp
+- **POST /mcp** - Send JSON-RPC 2.0 requests and receive responses
+- **GET /mcp** - Server-Sent Events (SSE) stream for real-time updates
+
+```bash
+# Example: Send initialize request
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
 ```
+
+## Authentication
+
+When user management is enabled in MonsterMQ, the MCP server requires authentication using JWT Bearer tokens. These are the same tokens used by the GraphQL API.
+
+### Obtaining a Token
+
+Use the GraphQL login mutation to obtain a JWT token:
+
+```bash
+curl -X POST http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -d '{"query":"mutation { login(username: \"admin\", password: \"your-password\") { success token message } }"}'
+```
+
+Response:
+```json
+{
+  "data": {
+    "login": {
+      "success": true,
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+      "message": "Login successful"
+    }
+  }
+}
+```
+
+### Using the Token
+
+Include the token in the `Authorization` header for all MCP requests:
+
+```bash
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}'
+```
+
+### Claude Desktop with Authentication
+
+When user management is enabled, configure Claude Desktop with authentication headers:
+
+```json
+{
+  "mcpServers": {
+    "monstermq": {
+      "type": "url",
+      "url": "http://localhost:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      }
+    }
+  }
+}
+```
+
+> **Note:** JWT tokens expire after 24 hours. You'll need to obtain a new token and update the configuration when the token expires.
+
+### Authentication Disabled
+
+If user management is disabled in MonsterMQ (`UserManagement.Enabled: false` in config), the MCP server allows unauthenticated access.
 
 ## Architecture
 

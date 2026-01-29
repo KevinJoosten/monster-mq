@@ -1,3 +1,18 @@
+// State persistence keys
+const STATE_KEYS = {
+    SELECTED_TOPIC: 'monstermq_topic_browser_selected_topic',
+    EXPANDED_NODES: 'monstermq_topic_browser_expanded_nodes',
+    SEARCH_QUERY: 'monstermq_topic_browser_search_query',
+    BROWSE_MODE: 'monstermq_topic_browser_mode',
+    AI_PANEL_OPEN: 'monstermq_topic_browser_ai_open',
+    AI_CHAT_HISTORY: 'monstermq_topic_browser_chat_history',
+    AI_CONTEXT_LOADED: 'monstermq_topic_browser_ai_context_loaded',
+    AI_CONTEXT_TOPIC: 'monstermq_topic_browser_ai_context_topic',
+    AI_CONTEXT_ARCHIVE_GROUP: 'monstermq_topic_browser_ai_context_archive_group',
+    ARCHIVE_GROUP: 'monstermq_selected_archive_group',
+    AI_SYSTEM_PROMPT: 'monstermq_ai_system_prompt'
+};
+
 class TopicBrowser {
     constructor() {
         this.tree = document.getElementById('topic-tree');
@@ -9,6 +24,7 @@ class TopicBrowser {
         this.treeNodes = new Map(); // topic path -> TreeNode
         this.selectedTopic = null;
         this.selectedArchiveGroup = 'Default'; // Default archiveGroup
+        this.expandedPaths = new Set(); // Track expanded node paths for persistence
 
         this.init();
     }
@@ -52,8 +68,11 @@ class TopicBrowser {
         // Load archive groups first, then load initial tree
         await this.loadArchiveGroups();
 
-        // Load initial tree structure with root node
-        this.createRootNode();
+        // Load initial tree structure with root node and wait for it to complete
+        await this.createRootNode();
+
+        // Restore state after root nodes are loaded
+        await this.restoreState();
     }
 
     async loadArchiveGroups() {
@@ -103,7 +122,7 @@ class TopicBrowser {
     }
 
     isLoggedIn() {
-        const token = localStorage.getItem('monstermq_token');
+        const token = safeStorage.getItem('monstermq_token');
         if (!token) return false;
 
         // If token is 'null', authentication is disabled
@@ -141,20 +160,58 @@ class TopicBrowser {
             this.browseButton.style.display = 'none';
             this.searchButton.style.display = 'inline-block';
         }
+        this.saveState(); // Persist mode change
     }
 
-    browseRoot() {
+    async browseRoot(preserveState = true) {
+        // Save expanded paths before clearing (they're already saved, just don't clear them)
+        const savedExpandedPaths = preserveState ? new Set(this.expandedPaths) : new Set();
+        const savedSelectedTopic = preserveState ? this.selectedTopic : null;
+
         // Clear current tree and reload from root
         this.tree.innerHTML = '';
         this.treeNodes.clear();
         this.selectedTopic = null;
         this.showEmptyDataViewer();
-        this.createRootNode();
+
+        // Restore expanded paths (don't clear them)
+        this.expandedPaths = savedExpandedPaths;
+
+        // Wait for root nodes to load
+        await this.createRootNode();
+
+        // Restore expanded nodes after tree loads
+        if (preserveState && (savedExpandedPaths.size > 0 || savedSelectedTopic)) {
+            await this.restoreExpandedNodes(savedSelectedTopic);
+        }
     }
 
-    createRootNode() {
+    /**
+     * Restore expanded nodes and selection after tree reload
+     */
+    async restoreExpandedNodes(selectedTopic = null) {
+        try {
+            // Expand nodes in order (parent first)
+            const sortedPaths = Array.from(this.expandedPaths).sort((a, b) =>
+                a.split('/').length - b.split('/').length
+            );
+
+            for (const path of sortedPaths) {
+                await this.expandToPath(path);
+            }
+
+            // Restore selected topic
+            if (selectedTopic) {
+                await this.restoreSelectedTopic(selectedTopic);
+            }
+        } catch (e) {
+            console.warn('Failed to restore expanded nodes:', e);
+        }
+    }
+
+    async createRootNode() {
         // Load the root level topics directly (don't create a synthetic root)
-        this.loadTopicLevel('+', this.tree, '');
+        await this.loadTopicLevel('+', this.tree, '');
     }
 
     async loadTopicLevel(pattern, container, parentPath = '') {
@@ -336,6 +393,7 @@ class TopicBrowser {
                 childContainer.classList.add('collapsed');
                 nodeData.toggle.classList.remove('expanded');
                 nodeData.expanded = false;
+                this.trackExpandedState(topicPath, false);
             }
         } else {
             // Expand
@@ -355,6 +413,7 @@ class TopicBrowser {
 
             nodeData.toggle.classList.add('expanded');
             nodeData.expanded = true;
+            this.trackExpandedState(topicPath, true);
         }
     }
 
@@ -366,6 +425,7 @@ class TopicBrowser {
         itemElement.classList.add('selected');
 
         this.selectedTopic = topicPath;
+        this.saveState(); // Persist selected topic
 
         // Don't try to load message data for the root node
         if (topicPath === 'root') {
@@ -531,6 +591,8 @@ class TopicBrowser {
         const searchTerm = this.searchInput.value.trim();
         if (!searchTerm) return;
 
+        this.saveState(); // Persist search query
+
         try {
             this.showSearchLoading();
 
@@ -607,7 +669,7 @@ class TopicBrowser {
         return structure;
     }
 
-    renderTreeStructure(structure, container, parentPath) {
+    renderTreeStructure(structure, container, parentPath, autoExpand = false) {
         for (const [name, data] of structure) {
             const hasChildren = data.children.size > 0;
             const treeItem = this.createTreeItem(name, data.fullPath, data.hasValue, hasChildren);
@@ -618,13 +680,21 @@ class TopicBrowser {
                 childContainer.className = 'tree-children';
                 treeItem.appendChild(childContainer);
 
-                this.renderTreeStructure(data.children, childContainer, data.fullPath);
+                this.renderTreeStructure(data.children, childContainer, data.fullPath, autoExpand);
 
-                // Auto-expand search results
+                // Only auto-expand if explicitly requested (e.g., new search)
+                // Otherwise, respect the saved expanded state
                 const nodeData = this.treeNodes.get(data.fullPath);
                 if (nodeData) {
-                    nodeData.toggle.classList.add('expanded');
-                    nodeData.expanded = true;
+                    const shouldExpand = autoExpand || this.expandedPaths.has(data.fullPath);
+                    if (shouldExpand) {
+                        nodeData.toggle.classList.add('expanded');
+                        nodeData.expanded = true;
+                        this.expandedPaths.add(data.fullPath);
+                    } else {
+                        // Start collapsed
+                        childContainer.classList.add('collapsed');
+                    }
                 }
             }
         }
@@ -666,10 +736,786 @@ class TopicBrowser {
         li.innerHTML = `<div class="error">Error: ${message}</div>`;
         return li;
     }
+
+    // ========== State Persistence Methods ==========
+
+    /**
+     * Save the current state to localStorage
+     */
+    saveState() {
+        try {
+            // Save selected topic
+            if (this.selectedTopic) {
+                localStorage.setItem(STATE_KEYS.SELECTED_TOPIC, this.selectedTopic);
+            } else {
+                localStorage.removeItem(STATE_KEYS.SELECTED_TOPIC);
+            }
+
+            // Save expanded nodes
+            const expandedArray = Array.from(this.expandedPaths);
+            localStorage.setItem(STATE_KEYS.EXPANDED_NODES, JSON.stringify(expandedArray));
+
+            // Save search query and mode
+            if (this.searchInput) {
+                localStorage.setItem(STATE_KEYS.SEARCH_QUERY, this.searchInput.value);
+            }
+            if (this.searchMode && this.searchMode.checked) {
+                localStorage.setItem(STATE_KEYS.BROWSE_MODE, 'search');
+            } else {
+                localStorage.setItem(STATE_KEYS.BROWSE_MODE, 'browse');
+            }
+        } catch (e) {
+            console.warn('Failed to save topic browser state:', e);
+        }
+    }
+
+    /**
+     * Restore state from localStorage after tree is loaded
+     */
+    async restoreState() {
+        try {
+            // Restore browse mode
+            const savedMode = localStorage.getItem(STATE_KEYS.BROWSE_MODE);
+            if (savedMode === 'search' && this.searchMode) {
+                this.searchMode.checked = true;
+                this.switchMode('search');
+            }
+
+            // Restore search query
+            const savedQuery = localStorage.getItem(STATE_KEYS.SEARCH_QUERY);
+            if (savedQuery && this.searchInput) {
+                this.searchInput.value = savedQuery;
+            }
+
+            // Restore expanded nodes (only the ones user manually expanded)
+            const savedExpanded = localStorage.getItem(STATE_KEYS.EXPANDED_NODES);
+            if (savedExpanded) {
+                const expandedArray = JSON.parse(savedExpanded);
+                console.log('Restoring expanded paths:', expandedArray);
+                this.expandedPaths = new Set(expandedArray);
+
+                // Expand nodes in order (parent first, shortest paths first)
+                const sortedPaths = expandedArray.sort((a, b) =>
+                    a.split('/').length - b.split('/').length
+                );
+
+                for (const path of sortedPaths) {
+                    console.log('Expanding path:', path);
+                    await this.expandToPath(path);
+                }
+            }
+
+            // Restore selected topic
+            const savedTopic = localStorage.getItem(STATE_KEYS.SELECTED_TOPIC);
+            if (savedTopic) {
+                console.log('Restoring selected topic:', savedTopic);
+                await this.restoreSelectedTopic(savedTopic);
+            }
+        } catch (e) {
+            console.warn('Failed to restore topic browser state:', e);
+        }
+    }
+
+    /**
+     * Expand the tree to show a specific path
+     */
+    async expandToPath(targetPath) {
+        const parts = targetPath.split('/');
+        let currentPath = '';
+
+        for (let i = 0; i < parts.length; i++) {
+            currentPath = i === 0 ? parts[i] : currentPath + '/' + parts[i];
+
+            const nodeData = this.treeNodes.get(currentPath);
+            if (nodeData && nodeData.hasChildren && !nodeData.expanded) {
+                await this.toggleNode(nodeData.element, currentPath);
+            }
+        }
+    }
+
+    /**
+     * Restore selection to a previously selected topic
+     */
+    async restoreSelectedTopic(topicPath) {
+        // First expand to the topic's parent path
+        const parts = topicPath.split('/');
+        if (parts.length > 1) {
+            const parentPath = parts.slice(0, -1).join('/');
+            await this.expandToPath(parentPath);
+        }
+
+        // Wait a bit for the tree to render
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        // Find and select the topic
+        const nodeData = this.treeNodes.get(topicPath);
+        if (nodeData && nodeData.item) {
+            this.selectTopic(topicPath, nodeData.item);
+        }
+    }
+
+    /**
+     * Track expanded state when a node is toggled
+     */
+    trackExpandedState(topicPath, isExpanded) {
+        if (isExpanded) {
+            this.expandedPaths.add(topicPath);
+            console.log('Node expanded:', topicPath, '| Total expanded:', this.expandedPaths.size);
+        } else {
+            // When collapsing, also remove all children from expanded paths
+            // This ensures that when the user collapses a parent, the entire subtree
+            // is considered collapsed
+            const pathsToRemove = [];
+            for (const path of this.expandedPaths) {
+                if (path === topicPath || path.startsWith(topicPath + '/')) {
+                    pathsToRemove.push(path);
+                }
+            }
+            for (const path of pathsToRemove) {
+                this.expandedPaths.delete(path);
+            }
+            console.log('Node collapsed:', topicPath, '| Removed paths:', pathsToRemove, '| Total expanded:', this.expandedPaths.size);
+        }
+        this.saveState();
+    }
+}
+
+/**
+ * AI Analysis functionality for Topic Browser
+ */
+class TopicBrowserAI {
+    constructor(topicBrowser) {
+        this.topicBrowser = topicBrowser;
+        this.chatHistory = [];  // Stores {role: 'user'|'assistant', content: string}
+        this.contextLoaded = false;  // Track if topic data has been sent
+        this.contextTopic = null;  // Topic pattern used when context was loaded
+        this.contextArchiveGroup = null;  // Archive group used when context was loaded
+        this.quickActions = [];  // Loaded from config file
+        this.defaultSystemPrompt = null;  // Will be loaded from config file
+        this.isPanelOpen = false;  // Track panel state
+
+        this.init();
+    }
+
+    async init() {
+        // Load config from file (includes system prompt and quick actions)
+        await this.loadConfig();
+
+        // Load saved system prompt or use default from config
+        this.systemPrompt = localStorage.getItem('monstermq_ai_system_prompt') || this.defaultSystemPrompt;
+
+        const systemPromptEl = document.getElementById('ai-system-prompt');
+        if (systemPromptEl) {
+            systemPromptEl.value = this.systemPrompt;
+        }
+
+        // Event listeners
+        this.setupEventListeners();
+    }
+
+    /**
+     * Load config from ai-prompts.json (system prompt and quick actions)
+     */
+    async loadConfig() {
+        try {
+            const response = await fetch('/config/ai-prompts.json');
+            if (response.ok) {
+                const config = await response.json();
+                // Load system prompt from config
+                if (config.systemPrompt) {
+                    this.defaultSystemPrompt = config.systemPrompt;
+                } else {
+                    this.useDefaultSystemPrompt();
+                }
+                // Load quick actions
+                this.quickActions = config.quickActions || [];
+                this.renderQuickActionButtons();
+            } else {
+                console.warn('Could not load ai-prompts.json, using defaults');
+                this.useDefaultSystemPrompt();
+                this.useDefaultQuickActions();
+            }
+        } catch (e) {
+            console.warn('Error loading ai-prompts.json:', e.message);
+            this.useDefaultSystemPrompt();
+            this.useDefaultQuickActions();
+        }
+    }
+
+    /**
+     * Fallback default system prompt if config file is not available
+     */
+    useDefaultSystemPrompt() {
+        this.defaultSystemPrompt = `You are an MQTT topic tree analyst helping users understand their IoT data.
+The data below shows MQTT topics and their current values in a hierarchical tree format using ASCII art (├── └── │).
+
+**Output format:** Use Markdown formatting in your responses:
+- Use ## headings for sections
+- Use **bold** for emphasis
+- Use \`code\` for topic names and values
+- Use bullet lists for findings
+- Use tables when comparing data
+
+**Important rules:**
+- NEVER reproduce the raw input data table in your response
+- Do NOT echo back the topic tree structure you received
+- Avoid long sequences of dashes (---) or other separator characters
+- Focus on analysis and insights, not data reproduction
+
+When analyzing:
+- Identify naming patterns and hierarchy structure
+- Spot anomalies or unusual values
+- Recognize IoT patterns (Sparkplug, Homie, etc.)
+- Provide concise, actionable insights
+
+Topic data:`;
+    }
+
+    /**
+     * Fallback default prompts if config file is not available
+     */
+    useDefaultQuickActions() {
+        this.quickActions = [
+            {
+                id: 'summarize',
+                label: 'Summarize',
+                title: 'Summarize the topic tree',
+                prompt: 'Provide a high-level summary of this topic tree. What kind of data is being collected? What systems or devices are represented?'
+            },
+            {
+                id: 'find-structure',
+                label: 'Find Structure',
+                title: 'Analyze naming patterns and hierarchy',
+                prompt: 'Analyze the MQTT topic tree to identify naming patterns, hierarchy structure, and potential data models.'
+            },
+            {
+                id: 'detect-anomalies',
+                label: 'Detect Anomalies',
+                title: 'Find unusual values or outliers',
+                prompt: 'Look for anomalies in this data: unusual values, potential errors, outliers, or values that seem inconsistent with their neighbors.'
+            }
+        ];
+        this.renderQuickActionButtons();
+    }
+
+    /**
+     * Dynamically render quick action buttons from config
+     */
+    renderQuickActionButtons() {
+        const container = document.getElementById('ai-quick-actions');
+        if (!container) return;
+
+        // Clear existing buttons
+        container.innerHTML = '';
+
+        // Create buttons from config
+        for (const action of this.quickActions) {
+            const button = document.createElement('button');
+            button.id = `ai-${action.id}`;
+            button.className = 'ai-action-btn';
+            button.title = action.title || action.label;
+            button.textContent = action.label;
+            button.addEventListener('click', () => this.quickAction(action.prompt));
+            container.appendChild(button);
+        }
+    }
+
+    setupEventListeners() {
+        // Toggle panel
+        const toggleBtn = document.getElementById('toggle-ai-panel');
+        const closeBtn = document.getElementById('close-ai-panel');
+
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', () => this.togglePanel());
+        }
+
+        if (closeBtn) {
+            closeBtn.addEventListener('click', () => this.togglePanel(false));
+        }
+
+        // Send button and enter key
+        const sendBtn = document.getElementById('ai-send');
+        const questionInput = document.getElementById('ai-question');
+
+        if (sendBtn) {
+            sendBtn.addEventListener('click', () => this.analyze());
+        }
+
+        if (questionInput) {
+            questionInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    this.analyze();
+                }
+            });
+        }
+
+        // Quick action buttons are now dynamically created in renderQuickActionButtons()
+
+        // System prompt
+        const resetPromptBtn = document.getElementById('ai-reset-prompt');
+        const systemPromptEl = document.getElementById('ai-system-prompt');
+
+        if (resetPromptBtn) {
+            resetPromptBtn.addEventListener('click', () => this.resetPrompt());
+        }
+
+        if (systemPromptEl) {
+            systemPromptEl.addEventListener('change', (e) => {
+                this.systemPrompt = e.target.value;
+                localStorage.setItem('monstermq_ai_system_prompt', this.systemPrompt);
+            });
+        }
+
+        // Clear context button
+        const clearContextBtn = document.getElementById('ai-clear-context');
+        if (clearContextBtn) {
+            clearContextBtn.addEventListener('click', () => this.clearContext());
+        }
+    }
+
+    /**
+     * Clear chat history and context - starts fresh conversation
+     */
+    clearContext() {
+        this.chatHistory = [];
+        this.contextLoaded = false;
+        this.contextTopic = null;
+        this.contextArchiveGroup = null;
+
+        // Clear chat history UI
+        const chatHistory = document.getElementById('ai-chat-history');
+        if (chatHistory) {
+            chatHistory.innerHTML = '';
+        }
+
+        // Reset topic count
+        const topicCountEl = document.getElementById('ai-topic-count');
+        if (topicCountEl) {
+            topicCountEl.textContent = '-';
+            topicCountEl.style.color = 'var(--monster-teal)';
+        }
+
+        // Update context indicator
+        this.updateContextIndicator();
+
+        // Clear persisted state
+        this.saveState();
+
+        console.log('AI context cleared - next question will reload topic data');
+    }
+
+    /**
+     * Update the visual indicator showing if context is loaded
+     */
+    updateContextIndicator() {
+        const indicator = document.getElementById('ai-context-status');
+        if (indicator) {
+            if (this.contextLoaded) {
+                indicator.textContent = '● Context loaded';
+                indicator.style.color = 'var(--monster-green)';
+                indicator.title = 'Topic data is cached. Follow-up questions will be faster.';
+            } else {
+                indicator.textContent = '○ No context';
+                indicator.style.color = 'var(--text-muted)';
+                indicator.title = 'Next question will load topic data.';
+            }
+        }
+    }
+
+    togglePanel(forceState = null) {
+        const panel = document.getElementById('ai-panel');
+        const toggleBtn = document.getElementById('toggle-ai-panel');
+        const layout = document.querySelector('.topic-browser-layout');
+
+        if (!panel || !layout) return;
+
+        const shouldShow = forceState !== null ? forceState : panel.style.display === 'none';
+
+        if (shouldShow) {
+            panel.style.display = 'flex';
+            layout.classList.add('ai-open');
+            if (toggleBtn) toggleBtn.classList.add('active');
+            this.isPanelOpen = true;
+            this.updateContextInfo();
+        } else {
+            panel.style.display = 'none';
+            layout.classList.remove('ai-open');
+            if (toggleBtn) toggleBtn.classList.remove('active');
+            this.isPanelOpen = false;
+        }
+        this.saveState(); // Persist panel state
+    }
+
+    updateContextInfo() {
+        const topicPatternEl = document.getElementById('ai-topic-pattern');
+        const archiveGroupEl = document.getElementById('ai-archive-group');
+
+        if (topicPatternEl) {
+            // Use saved context topic if context is loaded, otherwise show current selection
+            if (this.contextLoaded && this.contextTopic) {
+                topicPatternEl.textContent = this.contextTopic;
+            } else {
+                topicPatternEl.textContent = this.getTopicPattern();
+            }
+        }
+
+        if (archiveGroupEl) {
+            // Use saved context archive group if context is loaded, otherwise show current selection
+            if (this.contextLoaded && this.contextArchiveGroup) {
+                archiveGroupEl.textContent = this.contextArchiveGroup;
+            } else {
+                archiveGroupEl.textContent = this.topicBrowser.selectedArchiveGroup || 'Default';
+            }
+        }
+    }
+
+    updateTopicCount(count, maxTopics) {
+        const topicCountEl = document.getElementById('ai-topic-count');
+        if (topicCountEl) {
+            if (count >= maxTopics) {
+                // Show warning color when limit reached
+                topicCountEl.textContent = `${count}+`;
+                topicCountEl.style.color = 'var(--monster-orange, #f59e0b)';
+            } else {
+                topicCountEl.textContent = count;
+                topicCountEl.style.color = 'var(--monster-teal)';
+            }
+        }
+    }
+
+    getTopicPattern() {
+        // Use selected topic + subtopics, or all topics
+        if (this.topicBrowser.selectedTopic && this.topicBrowser.selectedTopic !== 'root') {
+            return this.topicBrowser.selectedTopic + '/#';
+        }
+        return '#'; // All topics
+    }
+
+    async analyze(question = null) {
+        const questionInput = document.getElementById('ai-question');
+        const q = question || (questionInput ? questionInput.value.trim() : '');
+
+        if (!q) return;
+
+        // Add user message to chat UI
+        this.addMessage('user', q);
+
+        if (questionInput) {
+            questionInput.value = '';
+        }
+
+        // Update context info
+        this.updateContextInfo();
+
+        // Show loading
+        const loadingId = this.addMessage('assistant', 'Analyzing topics...', true);
+
+        try {
+            const maxTopics = this.getMaxTopics();
+            const result = await this.callAnalyzeAPI(q);
+            this.removeMessage(loadingId);
+
+            // Update topic count display
+            this.updateTopicCount(result.topicsAnalyzed, maxTopics);
+
+            if (result.error) {
+                this.addMessage('assistant', `Error: ${result.error}`, false, true);
+            } else {
+                // Mark context as loaded after successful first request
+                if (!this.contextLoaded) {
+                    this.contextLoaded = true;
+                    // Save the topic pattern and archive group used for this context
+                    this.contextTopic = this.getTopicPattern();
+                    this.contextArchiveGroup = this.topicBrowser.selectedArchiveGroup || 'Default';
+                    this.updateContextIndicator();
+                    this.updateContextInfo();
+                }
+
+                // Save messages to chat history for follow-up questions
+                // Note: Topic data is always sent to the backend, chat history provides conversation context
+                this.chatHistory.push({ role: 'user', content: q });
+                this.chatHistory.push({ role: 'assistant', content: result.response });
+                this.saveState(); // Persist chat history
+
+                let statsText = '';
+                if (result.topicsAnalyzed > 0) {
+                    if (result.topicsAnalyzed >= maxTopics) {
+                        statsText = `\n\n_(Analyzed ${result.topicsAnalyzed} topics - limit reached, increase "Max" for more)_`;
+                    } else {
+                        statsText = `\n\n_(Analyzed ${result.topicsAnalyzed} topics)_`;
+                    }
+                }
+                const responseText = result.response + statsText;
+                this.addMessage('assistant', responseText);
+            }
+        } catch (err) {
+            this.removeMessage(loadingId);
+            this.addMessage('assistant', `Error: ${err.message}`, false, true);
+        }
+    }
+
+    quickAction(question) {
+        const questionInput = document.getElementById('ai-question');
+        if (questionInput) {
+            questionInput.value = question;
+        }
+        this.analyze(question);
+    }
+
+    getMaxTopics() {
+        const maxTopicsEl = document.getElementById('ai-max-topics');
+        return maxTopicsEl ? parseInt(maxTopicsEl.value, 10) : 100;
+    }
+
+    async callAnalyzeAPI(question) {
+        const query = `
+            query AnalyzeTopics($archiveGroup: String!, $topicPattern: String!, $question: String!, $systemPrompt: String, $maxTopics: Int, $chatHistory: [ChatMessage!]) {
+                genai {
+                    analyzeTopics(
+                        archiveGroup: $archiveGroup
+                        topicPattern: $topicPattern
+                        question: $question
+                        systemPrompt: $systemPrompt
+                        maxTopics: $maxTopics
+                        chatHistory: $chatHistory
+                    ) {
+                        response
+                        topicsAnalyzed
+                        model
+                        error
+                    }
+                }
+            }
+        `;
+
+        const maxTopics = this.getMaxTopics();
+        const isFollowUp = this.contextLoaded && this.chatHistory.length > 0;
+
+        const variables = {
+            archiveGroup: this.topicBrowser.selectedArchiveGroup || 'Default',
+            topicPattern: this.getTopicPattern(),
+            question: question,
+            systemPrompt: this.systemPrompt !== this.defaultSystemPrompt ? this.systemPrompt : null,
+            maxTopics: maxTopics,
+            // Only send chat history for follow-up questions (after context is loaded)
+            chatHistory: isFollowUp ? this.chatHistory : null
+        };
+
+        console.log('=== AI Analysis Request ===');
+        console.log('Is follow-up:', isFollowUp);
+        console.log('Chat history length:', this.chatHistory.length);
+
+        const result = await graphqlClient.query(query, variables);
+
+        if (!result || !result.genai || !result.genai.analyzeTopics) {
+            return { error: 'GenAI is not available. Check your configuration.' };
+        }
+
+        // Log the full LLM response for debugging
+        console.log('=== AI Analysis Response ===');
+        console.log('Topics analyzed:', result.genai.analyzeTopics.topicsAnalyzed);
+        console.log('Model:', result.genai.analyzeTopics.model);
+        console.log('Error:', result.genai.analyzeTopics.error);
+        console.log('Response length:', result.genai.analyzeTopics.response?.length || 0);
+        // Log FULL response - copy from console to see complete text
+        console.log('FULL RESPONSE START >>>');
+        console.log(result.genai.analyzeTopics.response);
+        console.log('<<< FULL RESPONSE END');
+        console.log('============================');
+
+        return result.genai.analyzeTopics;
+    }
+
+    addMessage(role, content, isLoading = false, isError = false) {
+        const id = 'msg-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+        const chatHistory = document.getElementById('ai-chat-history');
+
+        if (!chatHistory) return id;
+
+        // Log content being added to help debug truncation issues
+        console.log(`=== Adding ${role} message ===`);
+        console.log('Content length:', content?.length || 0);
+        console.log('Content preview (first 500 chars):', content?.substring(0, 500));
+        console.log('Content preview (last 500 chars):', content?.substring(content.length - 500));
+
+        const msgDiv = document.createElement('div');
+        msgDiv.id = id;
+        msgDiv.className = `chat-message chat-${role}`;
+
+        if (isLoading) msgDiv.classList.add('loading');
+        if (isError) msgDiv.classList.add('error');
+
+        // Use textContent for plain text to avoid any HTML parsing issues
+        // Then apply formatting
+        const formattedContent = this.formatMessage(content);
+        console.log('Formatted content length:', formattedContent?.length || 0);
+        msgDiv.innerHTML = formattedContent;
+
+        chatHistory.appendChild(msgDiv);
+        chatHistory.scrollTop = chatHistory.scrollHeight;
+
+        return id;
+    }
+
+    removeMessage(id) {
+        const msg = document.getElementById(id);
+        if (msg) {
+            msg.remove();
+        }
+    }
+
+    formatMessage(content) {
+        // Use marked.js for full markdown rendering if available
+        if (typeof marked !== 'undefined') {
+            try {
+                // Configure marked for safe rendering
+                marked.setOptions({
+                    breaks: true,      // Convert \n to <br>
+                    gfm: true,         // GitHub Flavored Markdown
+                    headerIds: false,  // Don't add IDs to headers
+                    mangle: false      // Don't mangle email addresses
+                });
+                return marked.parse(content);
+            } catch (e) {
+                console.warn('Markdown parsing failed, falling back to simple formatting:', e);
+            }
+        }
+
+        // Fallback: simple formatting if marked is not available
+        let result = content
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+
+        result = result.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+        result = result.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+        result = result.replace(/\n/g, '<br>');
+
+        return result;
+    }
+
+    resetPrompt() {
+        this.systemPrompt = this.defaultSystemPrompt;
+        const systemPromptEl = document.getElementById('ai-system-prompt');
+        if (systemPromptEl) {
+            systemPromptEl.value = this.systemPrompt;
+        }
+        localStorage.removeItem(STATE_KEYS.AI_SYSTEM_PROMPT);
+    }
+
+    // ========== State Persistence Methods ==========
+
+    /**
+     * Save AI panel state to localStorage
+     */
+    saveState() {
+        try {
+            // Save panel open state
+            localStorage.setItem(STATE_KEYS.AI_PANEL_OPEN, this.isPanelOpen ? 'true' : 'false');
+
+            // Save chat history
+            if (this.chatHistory.length > 0) {
+                localStorage.setItem(STATE_KEYS.AI_CHAT_HISTORY, JSON.stringify(this.chatHistory));
+            } else {
+                localStorage.removeItem(STATE_KEYS.AI_CHAT_HISTORY);
+            }
+
+            // Save context loaded state
+            localStorage.setItem(STATE_KEYS.AI_CONTEXT_LOADED, this.contextLoaded ? 'true' : 'false');
+
+            // Save context topic and archive group
+            if (this.contextTopic) {
+                localStorage.setItem(STATE_KEYS.AI_CONTEXT_TOPIC, this.contextTopic);
+            } else {
+                localStorage.removeItem(STATE_KEYS.AI_CONTEXT_TOPIC);
+            }
+            if (this.contextArchiveGroup) {
+                localStorage.setItem(STATE_KEYS.AI_CONTEXT_ARCHIVE_GROUP, this.contextArchiveGroup);
+            } else {
+                localStorage.removeItem(STATE_KEYS.AI_CONTEXT_ARCHIVE_GROUP);
+            }
+        } catch (e) {
+            console.warn('Failed to save AI state:', e);
+        }
+    }
+
+    /**
+     * Restore AI panel state from localStorage
+     */
+    restoreState() {
+        try {
+            // Restore chat history
+            const savedHistory = localStorage.getItem(STATE_KEYS.AI_CHAT_HISTORY);
+            if (savedHistory) {
+                this.chatHistory = JSON.parse(savedHistory);
+                // Rebuild chat UI from history
+                this.rebuildChatUI();
+            }
+
+            // Restore context topic and archive group
+            const savedContextTopic = localStorage.getItem(STATE_KEYS.AI_CONTEXT_TOPIC);
+            if (savedContextTopic) {
+                this.contextTopic = savedContextTopic;
+            }
+            const savedContextArchiveGroup = localStorage.getItem(STATE_KEYS.AI_CONTEXT_ARCHIVE_GROUP);
+            if (savedContextArchiveGroup) {
+                this.contextArchiveGroup = savedContextArchiveGroup;
+            }
+
+            // Restore context loaded state
+            const savedContextLoaded = localStorage.getItem(STATE_KEYS.AI_CONTEXT_LOADED);
+            if (savedContextLoaded === 'true') {
+                this.contextLoaded = true;
+                this.updateContextIndicator();
+                this.updateContextInfo(); // Update UI with saved context info
+            }
+
+            // Restore panel open state (do this last so UI updates properly)
+            const savedPanelOpen = localStorage.getItem(STATE_KEYS.AI_PANEL_OPEN);
+            if (savedPanelOpen === 'true') {
+                this.togglePanel(true);
+            }
+        } catch (e) {
+            console.warn('Failed to restore AI state:', e);
+        }
+    }
+
+    /**
+     * Rebuild chat UI from saved history
+     */
+    rebuildChatUI() {
+        const chatHistoryEl = document.getElementById('ai-chat-history');
+        if (!chatHistoryEl) return;
+
+        // Clear existing messages
+        chatHistoryEl.innerHTML = '';
+
+        // Rebuild from history
+        for (const msg of this.chatHistory) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `chat-message chat-${msg.role}`;
+            msgDiv.innerHTML = this.formatMessage(msg.content);
+            chatHistoryEl.appendChild(msgDiv);
+        }
+
+        // Scroll to bottom
+        chatHistoryEl.scrollTop = chatHistoryEl.scrollHeight;
+    }
 }
 
 // Initialize when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
     // Initialize topic browser (auth check is handled internally)
-    new TopicBrowser();
+    const topicBrowser = new TopicBrowser();
+
+    // Initialize AI functionality
+    window.topicBrowserAI = new TopicBrowserAI(topicBrowser);
+
+    // Restore AI state after a short delay to ensure everything is initialized
+    setTimeout(() => {
+        if (window.topicBrowserAI) {
+            window.topicBrowserAI.restoreState();
+        }
+    }, 500);
 });

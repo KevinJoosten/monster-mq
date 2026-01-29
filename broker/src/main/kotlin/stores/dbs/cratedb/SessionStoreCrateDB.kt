@@ -95,15 +95,23 @@ class SessionStoreCrateDB(
                 );             
                 """.trimIndent(), """
                 CREATE TABLE IF NOT EXISTS $queuedMessagesClientsTableName (
-                    client_id VARCHAR(65535),                
+                    client_id VARCHAR(65535),
                     message_uuid VARCHAR(36),
+                    status INTEGER DEFAULT 0,
                     PRIMARY KEY (client_id, message_uuid)
                 );
                 """.trimIndent())
 
+                // Create indexes
+                val createIndexesSQL = listOf(
+                    "CREATE INDEX IF NOT EXISTS ${queuedMessagesClientsTableName}_message_uuid_idx ON $queuedMessagesClientsTableName (message_uuid);",
+                    "CREATE INDEX IF NOT EXISTS ${queuedMessagesClientsTableName}_client_status_idx ON $queuedMessagesClientsTableName (client_id, status);"
+                )
+
                 // Execute the SQL statements
                 connection.createStatement().use { statement ->
                     createTableSQL.forEach(statement::executeUpdate)
+                    createIndexesSQL.forEach(statement::executeUpdate)
                 }
                 logger.info("Tables are ready [${Utils.getCurrentFunctionName()}]")
                 promise.complete()
@@ -443,7 +451,7 @@ class SessionStoreCrateDB(
                    "(message_uuid, message_id, topic, payload, qos, retained, client_id) VALUES (?, ?, ?, ?, ?, ?, ?) "+
                    "ON CONFLICT (message_uuid) DO NOTHING"
         val sql2 = "INSERT INTO $queuedMessagesClientsTableName "+
-                   "(client_id, message_uuid) VALUES (?, ?) "+
+                   "(client_id, message_uuid, status) VALUES (?, ?, 0) "+
                    "ON CONFLICT (client_id, message_uuid) DO NOTHING"
         try {
             db.connection?.let { connection ->
@@ -547,22 +555,181 @@ class SessionStoreCrateDB(
         }
     }
 
-    override fun purgeQueuedMessages() {
-        val sql = "DELETE FROM $queuedMessagesTableName WHERE message_uuid NOT IN " +
-                "(SELECT message_uuid FROM $queuedMessagesClientsTableName)"
+    override fun fetchNextPendingMessage(clientId: String): BrokerMessage? {
+        return fetchPendingMessages(clientId, 1).firstOrNull()
+    }
+
+    override fun fetchPendingMessages(clientId: String, limit: Int): List<BrokerMessage> {
+        val sql = "SELECT m.message_uuid, m.message_id, m.topic, m.payload, m.qos, m.retained, m.client_id " +
+                  "FROM $queuedMessagesTableName AS m JOIN $queuedMessagesClientsTableName AS c USING (message_uuid) " +
+                  "WHERE c.client_id = ? AND c.status = 0 " +
+                  "ORDER BY m.message_uuid LIMIT ?"
+        return try {
+            db.connection?.let { connection ->
+                // Note: REFRESH TABLE removed for performance - CrateDB uses eventually consistent reads
+                connection.prepareStatement(sql).use { preparedStatement ->
+                    preparedStatement.setString(1, clientId)
+                    preparedStatement.setInt(2, limit)
+                    val resultSet = preparedStatement.executeQuery()
+                    val messages = mutableListOf<BrokerMessage>()
+                    while (resultSet.next()) {
+                        messages.add(BrokerMessage(
+                            messageUuid = resultSet.getString(1),
+                            messageId = resultSet.getInt(2),
+                            topicName = resultSet.getString(3),
+                            payload = BrokerMessage.getPayloadFromBase64(resultSet.getString(4)),
+                            qosLevel = resultSet.getInt(5),
+                            isRetain = resultSet.getBoolean(6),
+                            isDup = false,
+                            isQueued = true,
+                            clientId = resultSet.getString(7)
+                        ))
+                    }
+                    messages
+                }
+            } ?: emptyList()
+        } catch (e: SQLException) {
+            logger.warning("Error fetching pending messages [${e.message}] [${Utils.getCurrentFunctionName()}]")
+            emptyList()
+        }
+    }
+
+    override fun markMessageInFlight(clientId: String, messageUuid: String) {
+        val sql = "UPDATE $queuedMessagesClientsTableName SET status = 1 WHERE client_id = ? AND message_uuid = ? AND status = 0"
         try {
-            DriverManager.getConnection(url, username, password).use { connection ->
-                val startTime = System.currentTimeMillis()
+            db.connection?.let { connection ->
+                connection.prepareStatement(sql).use { preparedStatement ->
+                    preparedStatement.setString(1, clientId)
+                    preparedStatement.setString(2, messageUuid)
+                    preparedStatement.executeUpdate()
+                }
+                connection.commit()
+            }
+        } catch (e: SQLException) {
+            logger.warning("Error marking message in-flight [${e.message}] [${Utils.getCurrentFunctionName()}]")
+        }
+    }
+
+    override fun markMessagesInFlight(clientId: String, messageUuids: List<String>) {
+        if (messageUuids.isEmpty()) return
+        val sql = "UPDATE $queuedMessagesClientsTableName SET status = 1 WHERE client_id = ? AND message_uuid = ANY (?) AND status = 0"
+        try {
+            db.connection?.let { connection ->
+                connection.prepareStatement(sql).use { preparedStatement ->
+                    preparedStatement.setString(1, clientId)
+                    preparedStatement.setArray(2, connection.createArrayOf("varchar", messageUuids.toTypedArray()))
+                    preparedStatement.executeUpdate()
+                }
+                connection.commit()
+            }
+        } catch (e: SQLException) {
+            logger.warning("Error marking messages in-flight [${e.message}] [${Utils.getCurrentFunctionName()}]")
+        }
+    }
+
+    override fun markMessageDelivered(clientId: String, messageUuid: String) {
+        val sql = "UPDATE $queuedMessagesClientsTableName SET status = 2 WHERE client_id = ? AND message_uuid = ?"
+        try {
+            db.connection?.let { connection ->
+                connection.prepareStatement(sql).use { preparedStatement ->
+                    preparedStatement.setString(1, clientId)
+                    preparedStatement.setString(2, messageUuid)
+                    preparedStatement.executeUpdate()
+                }
+                connection.commit()
+            }
+        } catch (e: SQLException) {
+            logger.warning("Error marking message delivered [${e.message}] [${Utils.getCurrentFunctionName()}]")
+        }
+    }
+
+    override fun resetInFlightMessages(clientId: String) {
+        val sql = "UPDATE $queuedMessagesClientsTableName SET status = 0 WHERE client_id = ? AND status = 1"
+        try {
+            db.connection?.let { connection ->
+                connection.prepareStatement(sql).use { preparedStatement ->
+                    preparedStatement.setString(1, clientId)
+                    preparedStatement.executeUpdate()
+                }
+                connection.commit()
+            }
+        } catch (e: SQLException) {
+            logger.warning("Error resetting in-flight messages [${e.message}] [${Utils.getCurrentFunctionName()}]")
+        }
+    }
+
+    override fun purgeDeliveredMessages(): Int {
+        val sql = "DELETE FROM $queuedMessagesClientsTableName WHERE status = 2"
+        return try {
+            db.connection?.let { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute("REFRESH TABLE $queuedMessagesClientsTableName")
+                }
+                connection.prepareStatement(sql).use { preparedStatement ->
+                    val count = preparedStatement.executeUpdate()
+                    connection.commit()
+                    count
+                }
+            } ?: 0
+        } catch (e: SQLException) {
+            logger.warning("Error purging delivered messages [${e.message}] [${Utils.getCurrentFunctionName()}]")
+            0
+        }
+    }
+
+    override fun purgeQueuedMessages() {
+        val batchSize = 5000
+        val delayBetweenBatchesMs = 100L
+        var totalDeleted = 0
+        val startTime = System.currentTimeMillis()
+
+        // Use batched deletion with NOT EXISTS for better performance
+        val sql = """
+            DELETE FROM $queuedMessagesTableName
+            WHERE message_uuid IN (
+                SELECT qm.message_uuid FROM $queuedMessagesTableName qm
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM $queuedMessagesClientsTableName qmc
+                    WHERE qmc.message_uuid = qm.message_uuid
+                )
+                LIMIT ?
+            )
+        """.trimIndent()
+
+        try {
+            db.connection?.let { connection ->
+                // CrateDB requires table refresh for consistency
                 connection.createStatement().use { statement ->
                     statement.execute("REFRESH TABLE $queuedMessagesTableName")
                     statement.execute("REFRESH TABLE $queuedMessagesClientsTableName")
                 }
+
                 connection.prepareStatement(sql).use { preparedStatement ->
-                    preparedStatement.executeUpdate()
-                    val endTime = System.currentTimeMillis()
-                    val duration = (endTime - startTime) / 1000.0
-                    logger.info("Purging queued messages finished in $duration seconds [${Utils.getCurrentFunctionName()}]")
+                    var deleted: Int
+                    do {
+                        preparedStatement.setInt(1, batchSize)
+                        deleted = preparedStatement.executeUpdate()
+                        totalDeleted += deleted
+
+                        if (deleted > 0) {
+                            logger.fine { "Purge batch: deleted $deleted orphaned messages (total: $totalDeleted) [${Utils.getCurrentFunctionName()}]" }
+                            if (deleted == batchSize) {
+                                // Refresh tables between batches for CrateDB
+                                connection.createStatement().use { statement ->
+                                    statement.execute("REFRESH TABLE $queuedMessagesTableName")
+                                }
+                                Thread.sleep(delayBetweenBatchesMs)
+                            }
+                        }
+                    } while (deleted == batchSize)
                 }
+            } ?: logger.warning("No database connection available for purging queued messages [${Utils.getCurrentFunctionName()}]")
+
+            val duration = (System.currentTimeMillis() - startTime) / 1000.0
+            if (totalDeleted > 0) {
+                logger.info("Purging queued messages finished: deleted $totalDeleted in $duration seconds [${Utils.getCurrentFunctionName()}]")
+            } else {
+                logger.fine("Purging queued messages finished: no orphaned messages found in $duration seconds [${Utils.getCurrentFunctionName()}]")
             }
         } catch (e: SQLException) {
             logger.warning("Error at purging queued messages [${e.message}] [${Utils.getCurrentFunctionName()}]")
@@ -571,19 +738,35 @@ class SessionStoreCrateDB(
 
     override fun purgeSessions() {
         try {
-            DriverManager.getConnection(url, username, password).use { connection ->
-                val statement = connection.createStatement()
-                statement.executeUpdate(
-                    "DELETE FROM $sessionsTableName WHERE clean_session = TRUE"
-                )
-                statement.executeUpdate(
-                    "DELETE FROM $subscriptionsTableName WHERE client_id NOT IN " +
-                            "(SELECT client_id FROM $sessionsTableName)"
-                )
-                statement.executeUpdate(
-                    "UPDATE $sessionsTableName SET connected = FALSE"
-                )
-            }
+            val startTime = System.currentTimeMillis()
+            db.connection?.let { connection ->
+                connection.createStatement().use { statement ->
+                    // Refresh tables for CrateDB consistency
+                    statement.execute("REFRESH TABLE $sessionsTableName")
+                    statement.execute("REFRESH TABLE $subscriptionsTableName")
+
+                    // Delete clean sessions
+                    statement.executeUpdate(
+                        "DELETE FROM $sessionsTableName WHERE clean_session = TRUE"
+                    )
+                    // Delete orphaned subscriptions using NOT EXISTS for better performance
+                    statement.executeUpdate(
+                        """
+                        DELETE FROM $subscriptionsTableName s
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM $sessionsTableName sess
+                            WHERE sess.client_id = s.client_id
+                        )
+                        """.trimIndent()
+                    )
+                    // Mark all sessions as disconnected
+                    statement.executeUpdate(
+                        "UPDATE $sessionsTableName SET connected = FALSE"
+                    )
+                }
+                val duration = (System.currentTimeMillis() - startTime) / 1000.0
+                logger.fine("Purging sessions finished in $duration seconds [${Utils.getCurrentFunctionName()}]")
+            } ?: logger.warning("No database connection available for purging sessions [${Utils.getCurrentFunctionName()}]")
         } catch (e: SQLException) {
             logger.warning("Error at purging sessions [${e.message}] [${Utils.getCurrentFunctionName()}]")
         }
@@ -610,7 +793,7 @@ class SessionStoreCrateDB(
     }
 
     override fun countQueuedMessagesForClient(clientId: String): Long {
-        val sql = "SELECT COUNT(*) FROM $queuedMessagesClientsTableName WHERE client_id = ?"
+        val sql = "SELECT COUNT(*) FROM $queuedMessagesClientsTableName WHERE client_id = ? AND status < 2"
         return try {
             DriverManager.getConnection(url, username, password).use { connection ->
                 connection.prepareStatement(sql).use { preparedStatement ->

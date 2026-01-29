@@ -31,7 +31,7 @@ class UserManager {
     }
 
     isLoggedIn() {
-        const token = localStorage.getItem('monstermq_token');
+        const token = safeStorage.getItem('monstermq_token');
         if (!token) return false;
 
         // If token is 'null', authentication is disabled
@@ -51,7 +51,7 @@ class UserManager {
     }
 
     getAuthHeaders() {
-        const token = localStorage.getItem('monstermq_token');
+        const token = safeStorage.getItem('monstermq_token');
         const headers = {
             'Content-Type': 'application/json'
         };
@@ -66,6 +66,25 @@ class UserManager {
 
     setupUI() {
         // UI setup is now handled by sidebar.js
+
+        // Update password checkbox toggle
+        const updatePasswordCheckbox = document.getElementById('user-update-password');
+        const passwordGroup = document.getElementById('password-group');
+        const passwordInput = document.getElementById('user-password');
+        
+        if (updatePasswordCheckbox) {
+            updatePasswordCheckbox.addEventListener('change', function() {
+                if (this.checked) {
+                    passwordGroup.style.display = 'block';
+                    passwordInput.setAttribute('required', '');
+                    passwordInput.focus();
+                } else {
+                    passwordGroup.style.display = 'none';
+                    passwordInput.removeAttribute('required');
+                    passwordInput.value = '';
+                }
+            });
+        }
 
         document.getElementById('refresh-users').addEventListener('click', () => {
             this.loadUsers();
@@ -207,9 +226,9 @@ class UserManager {
                     </td>
                     <td>
                         ${user.isAdmin ?
-                            '<span style="color: var(--monster-orange);">⚡ Admin</span>' :
-                            '<span style="color: var(--text-muted);">User</span>'
-                        }
+                    '<span style="color: var(--monster-orange);">⚡ Admin</span>' :
+                    '<span style="color: var(--text-muted);">User</span>'
+                }
                     </td>
                     <td>
                         <button class="btn btn-secondary view-acl-btn"
@@ -252,10 +271,19 @@ class UserManager {
         // Show/hide password field based on edit mode
         const passwordGroup = document.getElementById('password-group');
         const passwordInput = document.getElementById('user-password');
+        const updatePasswordCheckboxGroup = document.getElementById('update-password-checkbox-group');
+        const updatePasswordCheckbox = document.getElementById('user-update-password');
+        
         if (isEditing) {
+            // Show update password checkbox, hide password field initially
+            updatePasswordCheckboxGroup.style.display = 'block';
+            updatePasswordCheckbox.checked = false;
             passwordGroup.style.display = 'none';
             passwordInput.removeAttribute('required');
+            passwordInput.value = '';
         } else {
+            // Creating new user - hide checkbox, show required password field
+            updatePasswordCheckboxGroup.style.display = 'none';
             passwordGroup.style.display = 'block';
             passwordInput.setAttribute('required', '');
         }
@@ -305,7 +333,10 @@ class UserManager {
         };
 
         const password = formData.get('password');
-        if (password) {
+        const updatePasswordChecked = formData.get('updatePassword') === 'on';
+        
+        // For new users, password is required
+        if (!this.currentEditingUser && password) {
             userData.password = password;
         }
 
@@ -316,7 +347,23 @@ class UserManager {
             let result;
 
             if (isEditing) {
+                // Update user attributes (without password)
                 result = await window.graphqlClient.updateUser(userData);
+                
+                // If update password checkbox is checked, call setPassword separately
+                if (result.success && updatePasswordChecked && password) {
+                    const passwordResult = await window.graphqlClient.setPassword({
+                        username: usernameField,
+                        password: password
+                    });
+                    
+                    if (!passwordResult.success) {
+                        this.showAlert(passwordResult.message || 'User updated but failed to update password', 'warning');
+                        this.hideUserModal();
+                        this.loadUsers();
+                        return;
+                    }
+                }
             } else {
                 result = await window.graphqlClient.createUser(userData);
             }
@@ -486,15 +533,15 @@ class UserManager {
                                         <td style="font-family: monospace; word-break: break-all;">${this.escapeHtml(rule.topicPattern)}</td>
                                         <td style="text-align: center;">
                                             ${rule.canSubscribe ?
-                                                '<span style="color: var(--monster-green);">✓</span>' :
-                                                '<span style="color: var(--text-muted);">✗</span>'
-                                            }
+                    '<span style="color: var(--monster-green);">✓</span>' :
+                    '<span style="color: var(--text-muted);">✗</span>'
+                }
                                         </td>
                                         <td style="text-align: center;">
                                             ${rule.canPublish ?
-                                                '<span style="color: var(--monster-green);">✓</span>' :
-                                                '<span style="color: var(--text-muted);">✗</span>'
-                                            }
+                    '<span style="color: var(--monster-green);">✓</span>' :
+                    '<span style="color: var(--text-muted);">✗</span>'
+                }
                                         </td>
                                         <td style="text-align: center;">${rule.priority}</td>
                                         <td style="font-size: 0.75rem;">${rule.createdAt ? new Date(rule.createdAt).toLocaleDateString() : 'N/A'}</td>
