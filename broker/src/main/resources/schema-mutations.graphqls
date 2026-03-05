@@ -1194,6 +1194,8 @@ input Plc4xConnectionConfigInput {
     pollingInterval: Long = 1000
     # Delay in milliseconds before attempting reconnection
     reconnectDelay: Long = 5000
+    # TCP connect timeout in milliseconds
+    connectTimeout: Long = 5000
     # Whether polling is enabled
     enabled: Boolean = true
     # List of addresses to poll

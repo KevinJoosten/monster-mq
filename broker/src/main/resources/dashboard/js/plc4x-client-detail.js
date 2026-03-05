@@ -1,5 +1,21 @@
 // PLC4X Client Detail Management JavaScript
 
+// Protocol metadata: URL prefix, connection-string example, and address example
+const PROTOCOL_INFO = {
+    AB_ETHERNET:  { prefix: 'ab-eth://',          placeholder: 'e.g., ab-eth://192.168.1.100',                    addressPlaceholder: 'e.g., N7:0' },
+    ADS:          { prefix: 'ads://',             placeholder: 'e.g., ads://192.168.1.100/192.168.1.100.1:851',  addressPlaceholder: 'e.g., Main.nCounter:INT' },
+    BACNET_IP:    { prefix: 'bacnet-ip://',       placeholder: 'e.g., bacnet-ip://192.168.1.255',                 addressPlaceholder: 'e.g., analog-input,0:present-value' },
+    CANOPEN:      { prefix: 'canopen://',         placeholder: 'e.g., canopen:///dev/can0',                       addressPlaceholder: 'e.g., 0x1/0x6000/0x01:BOOLEAN' },
+    ETHERNET_IP:  { prefix: 'eip://',             placeholder: 'e.g., eip://192.168.1.100',                       addressPlaceholder: 'e.g., CT_AUX_POWER' },
+    FIRMATA:      { prefix: 'firmata:serial://',  placeholder: 'e.g., firmata:serial:///dev/ttyACM0',             addressPlaceholder: 'e.g., digital:3' },
+    KNXNET_IP:    { prefix: 'knxnet-ip://',       placeholder: 'e.g., knxnet-ip://224.0.23.12',                   addressPlaceholder: 'e.g., 1.1.10:1/2/3:DPT_Value_Temp' },
+    MODBUS_ASCII: { prefix: 'modbus-ascii://',    placeholder: 'e.g., modbus-ascii://192.168.1.100:502',          addressPlaceholder: 'e.g., holding-register:1:REAL' },
+    MODBUS_RTU:   { prefix: 'modbus-rtu://',      placeholder: 'e.g., modbus-rtu://192.168.1.100:502',            addressPlaceholder: 'e.g., holding-register:1:REAL' },
+    MODBUS_TCP:   { prefix: 'modbus-tcp://',      placeholder: 'e.g., modbus-tcp://192.168.1.100:502',            addressPlaceholder: 'e.g., holding-register:1:REAL' },
+    PROFINET:     { prefix: 'profinet://',        placeholder: 'e.g., profinet://192.168.1.100',                  addressPlaceholder: 'e.g., |var|MAIN.counter' },
+    S7:           { prefix: 's7://',              placeholder: 'e.g., s7://192.168.1.100',                        addressPlaceholder: 'e.g., %DB1.DBW0:INT' },
+};
+
 class Plc4xClientDetailManager {
     constructor() {
         this.client = new GraphQLDashboardClient('/graphql');
@@ -30,6 +46,9 @@ class Plc4xClientDetailManager {
         // Load data
         await this.loadClusterNodes();
 
+        // Wire up protocol → connection-string intelligence
+        this.setupProtocolChangeHandler();
+
         if (this.isNewMode) {
             this.setupNewClient();
         } else {
@@ -47,7 +66,10 @@ class Plc4xClientDetailManager {
         document.getElementById('client-config-enabled').checked = true;
         document.getElementById('client-polling-interval').value = '1000';
         document.getElementById('client-reconnect-delay').value = '5000';
+        document.getElementById('client-connect-timeout').value = '5000';
         document.getElementById('client-protocol').value = 'S7';
+        // Trigger protocol change so prefix/placeholder are set immediately
+        document.getElementById('client-protocol').dispatchEvent(new Event('change'));
 
         // Hide addresses section in new mode (will be available after saving)
         const addressesSection = document.getElementById('addresses-section');
@@ -116,6 +138,7 @@ class Plc4xClientDetailManager {
                             connectionString
                             pollingInterval
                             reconnectDelay
+                            connectTimeout
                             enabled
                             addresses {
                                 name
@@ -175,6 +198,8 @@ class Plc4xClientDetailManager {
         document.getElementById('client-name').disabled = true; // Can't change name in edit mode
         document.getElementById('client-namespace').value = this.clientData.namespace;
         document.getElementById('client-protocol').value = this.clientData.config.protocol;
+        // Update placeholder to match loaded protocol, but keep the actual saved connection string
+        this.updateConnectionStringPlaceholder(this.clientData.config.protocol);
         document.getElementById('client-connection-string').value = this.clientData.config.connectionString;
         document.getElementById('client-node').value = this.clientData.nodeId;
         document.getElementById('client-enabled').checked = this.clientData.enabled;
@@ -182,6 +207,7 @@ class Plc4xClientDetailManager {
         // Connection configuration
         document.getElementById('client-polling-interval').value = this.clientData.config.pollingInterval;
         document.getElementById('client-reconnect-delay').value = this.clientData.config.reconnectDelay;
+        document.getElementById('client-connect-timeout').value = this.clientData.config.connectTimeout ?? 5000;
         document.getElementById('client-config-enabled').checked = this.clientData.config.enabled;
 
         // Render addresses
@@ -395,6 +421,7 @@ class Plc4xClientDetailManager {
                 connectionString: connectionString,
                 pollingInterval: parseInt(document.getElementById('client-polling-interval').value),
                 reconnectDelay: parseInt(document.getElementById('client-reconnect-delay').value),
+                connectTimeout: parseInt(document.getElementById('client-connect-timeout').value) || 5000,
                 enabled: document.getElementById('client-config-enabled').checked,
                 addresses: this.isNewMode ? [] : (this.clientData.config.addresses || [])
             }
@@ -473,6 +500,37 @@ class Plc4xClientDetailManager {
         }
     }
 
+    setupProtocolChangeHandler() {
+        const protocolSelect = document.getElementById('client-protocol');
+        const connectionStringInput = document.getElementById('client-connection-string');
+        if (!protocolSelect || !connectionStringInput) return;
+
+        const allPrefixes = Object.values(PROTOCOL_INFO).map(i => i.prefix);
+
+        protocolSelect.addEventListener('change', () => {
+            const info = PROTOCOL_INFO[protocolSelect.value];
+            if (!info) return;
+
+            // Always update placeholder
+            connectionStringInput.placeholder = info.placeholder;
+
+            // Pre-fill the prefix when the field is empty or still contains only a bare prefix
+            const current = connectionStringInput.value.trim();
+            const isJustAPrefix = allPrefixes.includes(current);
+            if (!current || isJustAPrefix) {
+                connectionStringInput.value = info.prefix;
+            }
+        });
+    }
+
+    updateConnectionStringPlaceholder(protocol) {
+        const info = PROTOCOL_INFO[protocol];
+        const input = document.getElementById('client-connection-string');
+        if (info && input) {
+            input.placeholder = info.placeholder;
+        }
+    }
+
     formatProtocol(protocol) {
         const protocolNames = {
             'AB_ETHERNET': 'AB Ethernet',
@@ -508,6 +566,12 @@ class Plc4xClientDetailManager {
         document.getElementById('address-enabled').checked = true;
         document.getElementById('address-publish-on-change').checked = true;
         document.getElementById('address-qos').value = '0';
+        // Update address placeholder to match the currently selected protocol
+        const protocol = document.getElementById('client-protocol').value;
+        const info = PROTOCOL_INFO[protocol];
+        if (info) {
+            document.getElementById('address-address').placeholder = info.addressPlaceholder;
+        }
     }
 
     hideAddAddressModal() {

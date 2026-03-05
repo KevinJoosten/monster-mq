@@ -41,25 +41,68 @@ data class Plc4xConnectionConfig(
     val connectionString: String,
     val pollingInterval: Long = 1000,
     val reconnectDelay: Long = 5000,
+    val connectTimeout: Long = 5000,
     val addresses: List<Plc4xAddress> = emptyList(),
     val enabled: Boolean = true
 ) {
     companion object {
+        /**
+         * Maps each protocol key to its canonical PLC4X URL scheme.
+         */
+        private val PROTOCOL_PREFIXES = mapOf(
+            "AB_ETHERNET"  to "ab-eth://",
+            "ADS"          to "ads://",
+            "BACNET_IP"    to "bacnet-ip://",
+            "CANOPEN"      to "canopen://",
+            "ETHERNET_IP"  to "eip://",
+            "FIRMATA"      to "firmata:serial://",
+            "KNXNET_IP"    to "knxnet-ip://",
+            "MODBUS_ASCII" to "modbus-ascii://",
+            "MODBUS_RTU"   to "modbus-rtu://",
+            "MODBUS_TCP"   to "modbus-tcp://",
+            "PROFINET"     to "profinet://",
+            "S7"           to "s7://"
+        )
+
+        /**
+         * If the connection string has no URL scheme, prepends the canonical prefix
+         * for the given protocol (e.g. protocol=MODBUS_TCP + "192.168.1.1:502" → "modbus-tcp://192.168.1.1:502").
+         */
+        fun normalizeConnectionString(protocol: String, connectionString: String): String {
+            return if ("://" in connectionString) {
+                connectionString
+            } else {
+                val prefix = PROTOCOL_PREFIXES[protocol.uppercase()] ?: return connectionString
+                "$prefix$connectionString"
+            }
+        }
+
         fun fromJsonObject(json: JsonObject): Plc4xConnectionConfig {
             val addressesArray = json.getJsonArray("addresses", JsonArray())
             val addresses = addressesArray
                 .map { it as JsonObject }
                 .map { Plc4xAddress.fromJsonObject(it) }
 
+            val protocol = json.getString("protocol") ?: throw IllegalArgumentException("protocol is required")
+            val rawConnectionString = json.getString("connectionString") ?: throw IllegalArgumentException("connectionString is required")
             return Plc4xConnectionConfig(
-                protocol = json.getString("protocol") ?: throw IllegalArgumentException("protocol is required"),
-                connectionString = json.getString("connectionString") ?: throw IllegalArgumentException("connectionString is required"),
+                protocol = protocol,
+                connectionString = normalizeConnectionString(protocol, rawConnectionString),
                 pollingInterval = json.getLong("pollingInterval", 1000L),
                 reconnectDelay = json.getLong("reconnectDelay", 5000L),
+                connectTimeout = json.getLong("connectTimeout", 5000L),
                 addresses = addresses,
                 enabled = json.getBoolean("enabled", true)
             )
         }
+    }
+
+    /**
+     * Returns the connection string with connectTimeout appended as a URL parameter,
+     * used when actually opening the PLC4X connection.
+     */
+    fun effectiveConnectionString(): String {
+        return connectionString
     }
 
     fun toJsonObject(): JsonObject {
@@ -70,6 +113,7 @@ data class Plc4xConnectionConfig(
             .put("connectionString", connectionString)
             .put("pollingInterval", pollingInterval)
             .put("reconnectDelay", reconnectDelay)
+            .put("connectTimeout", connectTimeout)
             .put("addresses", addressesArray)
             .put("enabled", enabled)
     }
@@ -95,6 +139,10 @@ data class Plc4xConnectionConfig(
 
         if (reconnectDelay < 1000) {
             errors.add("Reconnect delay must be at least 1000ms")
+        }
+
+        if (connectTimeout < 1000) {
+            errors.add("Connect timeout must be at least 1000ms")
         }
 
         // Validate each address

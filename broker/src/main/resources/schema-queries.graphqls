@@ -1275,6 +1275,8 @@ type Plc4xConnectionConfig {
     pollingInterval: Long!
     # Delay in milliseconds before attempting reconnection (default: 5000ms)
     reconnectDelay: Long!
+    # TCP connect timeout in milliseconds (default: 5000ms)
+    connectTimeout: Long!
     # Configured PLC addresses to read
     addresses: [Plc4xAddress!]!
     # Whether polling is enabled for this connection

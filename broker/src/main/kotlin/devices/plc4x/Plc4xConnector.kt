@@ -199,11 +199,12 @@ class Plc4xConnector : AbstractVerticle() {
 
         vertx.executeBlocking<Void> {
             try {
-                logger.info("Connecting to PLC: ${plc4xConfig.connectionString}")
+                val effectiveUrl = plc4xConfig.effectiveConnectionString()
+                logger.info("Connecting to PLC: $effectiveUrl")
 
                 // PLC4X automatically selects the driver based on connection string prefix
                 // Examples: "s7://192.168.1.10", "modbus-tcp://192.168.1.20:502", "ads://192.168.1.30"
-                connection = driverManager!!.getConnectionManager().getConnection(plc4xConfig.connectionString)
+                connection = driverManager!!.getConnectionManager().getConnection(effectiveUrl)
 
                 if (connection != null && connection!!.isConnected) {
                     isConnected = true

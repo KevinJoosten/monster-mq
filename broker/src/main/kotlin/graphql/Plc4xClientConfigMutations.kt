@@ -702,11 +702,14 @@ class Plc4xClientConfigMutations(
             map as Map<String, Any>
         } ?: throw IllegalArgumentException("Invalid or missing 'config' field")
 
+        val protocol = (configMap["protocol"] as? String) ?: throw IllegalArgumentException("Protocol is required")
+        val rawConnectionString = (configMap["connectionString"] as? String) ?: throw IllegalArgumentException("Connection string is required")
         val config = Plc4xConnectionConfig(
-            protocol = (configMap["protocol"] as? String) ?: throw IllegalArgumentException("Protocol is required"),
-            connectionString = (configMap["connectionString"] as? String) ?: throw IllegalArgumentException("Connection string is required"),
+            protocol = protocol,
+            connectionString = Plc4xConnectionConfig.normalizeConnectionString(protocol, rawConnectionString),
             pollingInterval = (configMap["pollingInterval"] as? Number)?.toLong() ?: 1000L,
             reconnectDelay = (configMap["reconnectDelay"] as? Number)?.toLong() ?: 5000L,
+            connectTimeout = (configMap["connectTimeout"] as? Number)?.toLong() ?: 5000L,
             addresses = emptyList(), // Addresses are managed separately
             enabled = configMap["enabled"] as? Boolean ?: true
         )
@@ -748,6 +751,7 @@ class Plc4xClientConfigMutations(
                 "connectionString" to config.connectionString,
                 "pollingInterval" to config.pollingInterval,
                 "reconnectDelay" to config.reconnectDelay,
+                "connectTimeout" to config.connectTimeout,
                 "enabled" to config.enabled,
                 "addresses" to config.addresses.map { address ->
                     mapOf(

@@ -111,6 +111,7 @@ class Plc4xClientConfigQueries(
                 "connectionString" to config.connectionString,
                 "pollingInterval" to config.pollingInterval,
                 "reconnectDelay" to config.reconnectDelay,
+                "connectTimeout" to config.connectTimeout,
                 "enabled" to config.enabled,
                 "addresses" to config.addresses.map { address ->
                     mapOf(
