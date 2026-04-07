@@ -86,75 +86,67 @@ class DashboardManager {
             data: {
                 labels: [],
                 datasets: [
-                    {   // 0
-                        label: 'Msg/In',
+                    {   // 0 - MQTT Messages total (in+out)
+                        label: 'MQTT Messages',
                         data: [],
                         borderColor: '#22C55E',
                         backgroundColor: 'rgba(34, 197, 94, 0.12)',
                         tension: 0.35,
                         fill: true
                     },
-                    {   // 1
-                        label: 'Msg/Out',
-                        data: [],
-                        borderColor: '#6366F1',
-                        backgroundColor: 'rgba(99, 102, 241, 0.12)',
-                        tension: 0.35,
-                        fill: true
-                    },
-                    {   // 2
-                        label: 'MQTT/In',
+                    {   // 1 - MQTT Bridges total (in+out)
+                        label: 'MQTT Bridges',
                         data: [],
                         borderColor: '#0EA5E9',
                         backgroundColor: 'rgba(14, 165, 233, 0.12)',
                         tension: 0.35,
                         fill: true
                     },
-                    {   // 3
-                        label: 'MQTT/Out',
-                        data: [],
-                        borderColor: '#F59E0B',
-                        backgroundColor: 'rgba(245, 158, 11, 0.12)',
-                        tension: 0.35,
-                        fill: true
-                    },
-                    {   // 4
-                        label: 'Kafka/In',
+                    {   // 2 - Kafka total
+                        label: 'Kafka',
                         data: [],
                         borderColor: '#EF4444',
                         backgroundColor: 'rgba(239, 68, 68, 0.12)',
                         tension: 0.35,
                         fill: true
                     },
-                    {   // 5
-                        label: 'OPC UA/In',
+                    {   // 3 - OPC UA total (in+out)
+                        label: 'OPC UA',
                         data: [],
                         borderColor: '#14B8A6',
                         backgroundColor: 'rgba(20, 184, 166, 0.12)',
                         tension: 0.35,
                         fill: true
                     },
-                    {   // 6
-                        label: 'OPC UA/Out',
-                        data: [],
-                        borderColor: '#9333EA',
-                        backgroundColor: 'rgba(147, 51, 234, 0.12)',
-                        tension: 0.35,
-                        fill: true
-                    },
-                    {   // 7
-                        label: 'WinCCOA/In',
+                    {   // 4 - WinCC OA
+                        label: 'WinCC OA',
                         data: [],
                         borderColor: '#EC4899',
                         backgroundColor: 'rgba(236, 72, 153, 0.12)',
                         tension: 0.35,
                         fill: true
                     },
-                    {   // 8
-                        label: 'WinCCUA/In',
+                    {   // 5 - WinCC UA
+                        label: 'WinCC UA',
                         data: [],
                         borderColor: '#A78BFA',
                         backgroundColor: 'rgba(167, 139, 250, 0.12)',
+                        tension: 0.35,
+                        fill: true
+                    },
+                    {   // 6 - NATS total (in+out)
+                        label: 'NATS',
+                        data: [],
+                        borderColor: '#F59E0B',
+                        backgroundColor: 'rgba(245, 158, 11, 0.12)',
+                        tension: 0.35,
+                        fill: true
+                    },
+                    {   // 7 - Redis total (in+out)
+                        label: 'Redis',
+                        data: [],
+                        borderColor: '#6366F1',
+                        backgroundColor: 'rgba(99, 102, 241, 0.12)',
                         tension: 0.35,
                         fill: true
                     }
@@ -281,6 +273,7 @@ class DashboardManager {
             if (!document.getElementById('cluster-overview')) return; // page navigated away
             const brokers = await window.graphqlClient.getBrokers();
             this.updateMetrics(brokers);
+            this.updateLoggerMetrics();
             const archiveGroups = await this.loadArchiveGroups();
             if (this.historicalDataLoaded) {
                 this.addRealtimeDataPoint(brokers);
@@ -300,6 +293,7 @@ class DashboardManager {
             const brokers = await window.graphqlClient.getBrokersWithHistory(minutes);
             const archiveGroups = await this.loadArchiveGroupsWithHistory(minutes);
             this.updateMetrics(brokers);
+            this.updateLoggerMetrics();
             this.initializeChartsWithHistory(brokers);
             this.initializeArchiveGroupsChart(archiveGroups);
             const currentBrokers = await window.graphqlClient.getBrokers();
@@ -357,10 +351,12 @@ class DashboardManager {
                     messagesIn: 0, messagesOut: 0,
                     messageBusIn: 0, messageBusOut: 0,
                     mqttClientIn: 0, mqttClientOut: 0,
-                    kafkaClientIn: 0,
+                    kafkaClientIn: 0, kafkaClientOut: 0,
                     opcUaClientIn: 0, opcUaClientOut: 0,
                     winCCOaClientIn: 0,
-                    winCCUaClientIn: 0
+                    winCCUaClientIn: 0,
+                    natsClientIn: 0, natsClientOut: 0,
+                    redisClientIn: 0, redisClientOut: 0
                 };
             }
             aggregatedData[timeKey].messagesIn += point.messagesIn || 0;
@@ -370,11 +366,15 @@ class DashboardManager {
             aggregatedData[timeKey].mqttClientIn += point.mqttClientIn || 0;
             aggregatedData[timeKey].mqttClientOut += point.mqttClientOut || 0;
             aggregatedData[timeKey].kafkaClientIn += point.kafkaClientIn || 0;
-            // Removed kafkaClientOut (always zero / unused)
+            aggregatedData[timeKey].kafkaClientOut += point.kafkaClientOut || 0;
             aggregatedData[timeKey].opcUaClientIn += point.opcUaClientIn || 0;
             aggregatedData[timeKey].opcUaClientOut += point.opcUaClientOut || 0;
             aggregatedData[timeKey].winCCOaClientIn += point.winCCOaClientIn || 0;
             aggregatedData[timeKey].winCCUaClientIn += point.winCCUaClientIn || 0;
+            aggregatedData[timeKey].natsClientIn += point.natsClientIn || 0;
+            aggregatedData[timeKey].natsClientOut += point.natsClientOut || 0;
+            aggregatedData[timeKey].redisClientIn += point.redisClientIn || 0;
+            aggregatedData[timeKey].redisClientOut += point.redisClientOut || 0;
         });
 
         // Preserve chronological order by iterating sorted allHistoricalData sequence
@@ -384,22 +384,21 @@ class DashboardManager {
             if (!data) return; // safety guard
             const timeLabel = this.formatTimestampFor(this.currentTimeframe, timestamp);
             this.trafficChart.data.labels.push(timeLabel);
-            this.trafficChart.data.datasets[0].data.push(data.messagesIn);
-            this.trafficChart.data.datasets[1].data.push(data.messagesOut);
-            this.trafficChart.data.datasets[2].data.push(data.mqttClientIn);
-            this.trafficChart.data.datasets[3].data.push(data.mqttClientOut);
-            this.trafficChart.data.datasets[4].data.push(data.kafkaClientIn);
-            this.trafficChart.data.datasets[5].data.push(data.opcUaClientIn);
-            this.trafficChart.data.datasets[6].data.push(data.opcUaClientOut);
-            this.trafficChart.data.datasets[7].data.push(data.winCCOaClientIn ?? null);
-            this.trafficChart.data.datasets[8].data.push(data.winCCUaClientIn ?? null);
+            this.trafficChart.data.datasets[0].data.push(data.messagesIn + data.messagesOut);  // MQTT Messages
+            this.trafficChart.data.datasets[1].data.push(data.mqttClientIn + data.mqttClientOut);  // MQTT Bridges
+            this.trafficChart.data.datasets[2].data.push(data.kafkaClientIn + data.kafkaClientOut);  // Kafka
+            this.trafficChart.data.datasets[3].data.push(data.opcUaClientIn + data.opcUaClientOut);  // OPC UA
+            this.trafficChart.data.datasets[4].data.push(data.winCCOaClientIn);  // WinCC OA (in only)
+            this.trafficChart.data.datasets[5].data.push(data.winCCUaClientIn);  // WinCC UA (in only)
+            this.trafficChart.data.datasets[6].data.push(data.natsClientIn + data.natsClientOut);  // NATS
+            this.trafficChart.data.datasets[7].data.push(data.redisClientIn + data.redisClientOut);  // Redis
         });
 
         console.debug('Traffic history loaded', {
             timeframe: this.currentTimeframe,
             points: this.trafficChart.data.labels.length,
-            sampleLast5KafkaIn: this.trafficChart.data.datasets[4].data.slice(-5),
-            sampleLast5OpcUaIn: this.trafficChart.data.datasets[5].data.slice(-5)
+            sampleLast5Kafka: this.trafficChart.data.datasets[2].data.slice(-5),
+            sampleLast5OpcUa: this.trafficChart.data.datasets[3].data.slice(-5)
         });
 
         this.messageBusChart.data.labels = brokers.map(b => b.nodeId);
@@ -429,13 +428,17 @@ class DashboardManager {
                 mqttClientIn: acc.mqttClientIn + (metrics.mqttClientIn || 0),
                 mqttClientOut: acc.mqttClientOut + (metrics.mqttClientOut || 0),
                 kafkaClientIn: acc.kafkaClientIn + (metrics.kafkaClientIn || 0),
-                // kafkaClientOut removed
+                kafkaClientOut: acc.kafkaClientOut + (metrics.kafkaClientOut || 0),
                 opcUaClientIn: acc.opcUaClientIn + (metrics.opcUaClientIn || 0),
                 opcUaClientOut: acc.opcUaClientOut + (metrics.opcUaClientOut || 0),
                 winCCOaClientIn: acc.winCCOaClientIn + (metrics.winCCOaClientIn || 0),
-                winCCUaClientIn: acc.winCCUaClientIn + (metrics.winCCUaClientIn || 0)
+                winCCUaClientIn: acc.winCCUaClientIn + (metrics.winCCUaClientIn || 0),
+                natsClientIn: acc.natsClientIn + (metrics.natsClientIn || 0),
+                natsClientOut: acc.natsClientOut + (metrics.natsClientOut || 0),
+                redisClientIn: acc.redisClientIn + (metrics.redisClientIn || 0),
+                redisClientOut: acc.redisClientOut + (metrics.redisClientOut || 0)
             };
-        }, { messagesIn: 0, messagesOut: 0, messageBusIn: 0, messageBusOut: 0, mqttClientIn: 0, mqttClientOut: 0, kafkaClientIn: 0, opcUaClientIn: 0, opcUaClientOut: 0, winCCOaClientIn: 0, winCCUaClientIn: 0 });
+        }, { messagesIn: 0, messagesOut: 0, messageBusIn: 0, messageBusOut: 0, mqttClientIn: 0, mqttClientOut: 0, kafkaClientIn: 0, kafkaClientOut: 0, opcUaClientIn: 0, opcUaClientOut: 0, winCCOaClientIn: 0, winCCUaClientIn: 0, natsClientIn: 0, natsClientOut: 0, redisClientIn: 0, redisClientOut: 0 });
 
         if (this.trafficChart.data.labels.length >= this.maxDataPoints) {
             this.trafficChart.data.labels.shift();
@@ -445,16 +448,14 @@ class DashboardManager {
         }
 
         this.trafficChart.data.labels.push(timeLabel);
-        this.trafficChart.data.datasets[0].data.push(clusterTotals.messagesIn);
-        this.trafficChart.data.datasets[1].data.push(clusterTotals.messagesOut);
-        this.trafficChart.data.datasets[2].data.push(clusterTotals.mqttClientIn);
-        this.trafficChart.data.datasets[3].data.push(clusterTotals.mqttClientOut);
-        this.trafficChart.data.datasets[4].data.push(clusterTotals.kafkaClientIn);
-        // Removed kafkaClientOut dataset push
-        this.trafficChart.data.datasets[5].data.push(clusterTotals.opcUaClientIn);
-        this.trafficChart.data.datasets[6].data.push(clusterTotals.opcUaClientOut);
-        this.trafficChart.data.datasets[7].data.push(clusterTotals.winCCOaClientIn ?? null);
-        this.trafficChart.data.datasets[8].data.push(clusterTotals.winCCUaClientIn ?? null);
+        this.trafficChart.data.datasets[0].data.push(clusterTotals.messagesIn + clusterTotals.messagesOut);  // MQTT Messages
+        this.trafficChart.data.datasets[1].data.push(clusterTotals.mqttClientIn + clusterTotals.mqttClientOut);  // MQTT Bridges
+        this.trafficChart.data.datasets[2].data.push(clusterTotals.kafkaClientIn + clusterTotals.kafkaClientOut);  // Kafka
+        this.trafficChart.data.datasets[3].data.push(clusterTotals.opcUaClientIn + clusterTotals.opcUaClientOut);  // OPC UA
+        this.trafficChart.data.datasets[4].data.push(clusterTotals.winCCOaClientIn);  // WinCC OA
+        this.trafficChart.data.datasets[5].data.push(clusterTotals.winCCUaClientIn);  // WinCC UA
+        this.trafficChart.data.datasets[6].data.push(clusterTotals.natsClientIn + clusterTotals.natsClientOut);  // NATS
+        this.trafficChart.data.datasets[7].data.push(clusterTotals.redisClientIn + clusterTotals.redisClientOut);  // Redis
         this.trafficChart.update('none');
 
         this.messageBusChart.data.labels = brokers.map(b => b.nodeId);
@@ -490,19 +491,26 @@ class DashboardManager {
                 mqttClientIn: acc.mqttClientIn + (metrics.mqttClientIn || 0),
                 mqttClientOut: acc.mqttClientOut + (metrics.mqttClientOut || 0),
                 kafkaClientIn: acc.kafkaClientIn + (metrics.kafkaClientIn || 0),
+                kafkaClientOut: acc.kafkaClientOut + (metrics.kafkaClientOut || 0),
                 opcUaClientIn: acc.opcUaClientIn + (metrics.opcUaClientIn || 0),
                 opcUaClientOut: acc.opcUaClientOut + (metrics.opcUaClientOut || 0),
                 winCCOaClientIn: acc.winCCOaClientIn + (metrics.winCCOaClientIn || 0),
-                winCCUaClientIn: acc.winCCUaClientIn + (metrics.winCCUaClientIn || 0)
+                winCCUaClientIn: acc.winCCUaClientIn + (metrics.winCCUaClientIn || 0),
+                natsClientIn: acc.natsClientIn + (metrics.natsClientIn || 0),
+                natsClientOut: acc.natsClientOut + (metrics.natsClientOut || 0),
+                redisClientIn: acc.redisClientIn + (metrics.redisClientIn || 0),
+                redisClientOut: acc.redisClientOut + (metrics.redisClientOut || 0)
             };
         }, {
             messagesIn: 0, messagesOut: 0, totalSessions: 0, queuedMessages: 0,
             messageBusIn: 0, messageBusOut: 0,
             mqttClientIn: 0, mqttClientOut: 0,
-            kafkaClientIn: 0,
+            kafkaClientIn: 0, kafkaClientOut: 0,
             opcUaClientIn: 0, opcUaClientOut: 0,
             winCCOaClientIn: 0,
-            winCCUaClientIn: 0
+            winCCUaClientIn: 0,
+            natsClientIn: 0, natsClientOut: 0,
+            redisClientIn: 0, redisClientOut: 0
         });
 
         // Collect all enabled features across all cluster nodes (union)
@@ -517,42 +525,123 @@ class DashboardManager {
 
         const overviewContainer = document.getElementById('cluster-overview');
 
+        const cIn = '#22C55E';  // green for In
+        const cOut = '#6366F1'; // indigo for Out
+
+        const overallIn = clusterTotals.messagesIn + clusterTotals.mqttClientIn + clusterTotals.kafkaClientIn + clusterTotals.opcUaClientIn + (clusterTotals.winCCOaClientIn || 0) + (clusterTotals.winCCUaClientIn || 0) + clusterTotals.natsClientIn + clusterTotals.redisClientIn;
+        const overallOut = clusterTotals.messagesOut + clusterTotals.mqttClientOut + clusterTotals.kafkaClientOut + clusterTotals.opcUaClientOut + clusterTotals.natsClientOut + clusterTotals.redisClientOut;
+
         const cards = [
             `<div class="metric-card"><div class="metric-header"><span class="metric-title">Active Sessions</span><div class="metric-icon">👥</div></div><div class="metric-value">${clusterTotals.totalSessions}</div><div class="metric-label">${brokers.length} Node${brokers.length !== 1 ? 's' : ''}</div></div>`,
             `<div class="metric-card"><div class="metric-header"><span class="metric-title">Queued Messages</span><div class="metric-icon">⏳</div></div><div class="metric-value">${this.formatNumber(clusterTotals.queuedMessages)}</div><div class="metric-label">Pending Delivery</div></div>`,
             `<div class="metric-card">
+                <div class="metric-header"><span class="metric-title">Overall Messages</span><div class="metric-icon">📊</div></div>
+                <div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(overallIn)}</span> / <span style="color: ${cOut};">${this.formatNumber(overallOut)}</span></div>
+                <div class="metric-label">In / Out (all sources)</div>
+            </div>`,
+            `<div class="metric-card">
                 <div class="metric-header"><span class="metric-title">MQTT Messages</span><div class="metric-icon">📨</div></div>
-                <div class="metric-value"><span style="color: #22C55E;">${this.formatNumber(clusterTotals.messagesIn)}</span> / <span style="color: #6366F1;">${this.formatNumber(clusterTotals.messagesOut)}</span></div>
+                <div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(clusterTotals.messagesIn)}</span> / <span style="color: ${cOut};">${this.formatNumber(clusterTotals.messagesOut)}</span></div>
                 <div class="metric-label">In / Out</div>
             </div>`,
             isEnabled('MqttClient') ? `<div class="metric-card">
                 <div class="metric-header"><span class="metric-title">MQTT Bridges</span><div class="metric-icon">🌉</div></div>
-                <div class="metric-value"><span style="color: #0EA5E9;">${this.formatNumber(clusterTotals.mqttClientIn)}</span> / <span style="color: #F59E0B;">${this.formatNumber(clusterTotals.mqttClientOut)}</span></div>
+                <div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(clusterTotals.mqttClientIn)}</span> / <span style="color: ${cOut};">${this.formatNumber(clusterTotals.mqttClientOut)}</span></div>
                 <div class="metric-label">In / Out</div>
             </div>` : '',
             isEnabled('Kafka') ? `<div class="metric-card">
                 <div class="metric-header"><span class="metric-title">Kafka Bridges</span><div class="metric-icon">📦</div></div>
-                <div class="metric-value">${this.formatNumber(clusterTotals.kafkaClientIn)}</div>
-                <div class="metric-label">In</div>
+                <div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(clusterTotals.kafkaClientIn)}</span> / <span style="color: ${cOut};">${this.formatNumber(clusterTotals.kafkaClientOut)}</span></div>
+                <div class="metric-label">In / Out</div>
             </div>` : '',
             (isEnabled('OpcUa') || isEnabled('OpcUaServer')) ? `<div class="metric-card">
                 <div class="metric-header"><span class="metric-title">OPC UA Clients</span><div class="metric-icon">⚙️</div></div>
-                <div class="metric-value"><span style="color: #14B8A6;">${this.formatNumber(clusterTotals.opcUaClientIn)}</span> / <span style="color: #9333EA;">${this.formatNumber(clusterTotals.opcUaClientOut)}</span></div>
+                <div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(clusterTotals.opcUaClientIn)}</span> / <span style="color: ${cOut};">${this.formatNumber(clusterTotals.opcUaClientOut)}</span></div>
                 <div class="metric-label">In / Out</div>
             </div>` : '',
             isEnabled('WinCCOa') ? `<div class="metric-card">
                 <div class="metric-header"><span class="metric-title">WinCC OA Clients</span><div class="metric-icon">🏭</div></div>
-                <div class="metric-value">${this.formatNumber(clusterTotals.winCCOaClientIn || 0)}</div>
+                <div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(clusterTotals.winCCOaClientIn || 0)}</span></div>
                 <div class="metric-label">In</div>
             </div>` : '',
             isEnabled('WinCCUa') ? `<div class="metric-card">
                 <div class="metric-header"><span class="metric-title">WinCC UA Clients</span><div class="metric-icon">🔧</div></div>
-                <div class="metric-value">${this.formatNumber(clusterTotals.winCCUaClientIn || 0)}</div>
+                <div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(clusterTotals.winCCUaClientIn || 0)}</span></div>
                 <div class="metric-label">In</div>
+            </div>` : '',
+            isEnabled('Nats') ? `<div class="metric-card">
+                <div class="metric-header"><span class="metric-title">NATS Bridges</span><div class="metric-icon">📡</div></div>
+                <div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(clusterTotals.natsClientIn)}</span> / <span style="color: ${cOut};">${this.formatNumber(clusterTotals.natsClientOut)}</span></div>
+                <div class="metric-label">In / Out</div>
+            </div>` : '',
+            isEnabled('Redis') ? `<div class="metric-card">
+                <div class="metric-header"><span class="metric-title">Redis Bridges</span><div class="metric-icon">🗄️</div></div>
+                <div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(clusterTotals.redisClientIn)}</span> / <span style="color: ${cOut};">${this.formatNumber(clusterTotals.redisClientOut)}</span></div>
+                <div class="metric-label">In / Out</div>
             </div>` : '',
         ];
 
         overviewContainer.innerHTML = cards.join('');
+    }
+
+    async updateLoggerMetrics() {
+        try {
+            const cIn = '#22C55E';
+            const container = document.getElementById('logger-overview');
+            const section = document.getElementById('logger-section');
+            if (!container || !section) return;
+
+            // Collect all enabled features
+            const brokers = await window.graphqlClient.getBrokers();
+            const allEnabledFeatures = new Set(brokers.flatMap(b => b.enabledFeatures || []));
+            const anyNodeHasExplicitConfig = brokers.some(b => Array.isArray(b.enabledFeatures));
+            const isEnabled = (feature) => !anyNodeHasExplicitConfig || allEnabledFeatures.has(feature);
+
+            const loggerCards = [];
+
+            // JDBC Loggers
+            if (isEnabled('JdbcLogger')) {
+                try {
+                    const result = await window.graphqlClient.query(`query { jdbcLoggers { metrics { messagesIn messagesWritten } } }`);
+                    const loggers = result.jdbcLoggers || [];
+                    const totalIn = loggers.reduce((sum, l) => sum + (l.metrics?.[0]?.messagesIn || 0), 0);
+                    const totalOut = loggers.reduce((sum, l) => sum + (l.metrics?.[0]?.messagesWritten || 0), 0);
+                    if (loggers.length > 0) loggerCards.push(`<div class="metric-card"><div class="metric-header"><span class="metric-title">JDBC Loggers</span><div class="metric-icon">🗃️</div></div><div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(totalIn)}</span> / <span style="color: #6366F1;">${this.formatNumber(totalOut)}</span></div><div class="metric-label">In / Written (${loggers.length})</div></div>`);
+                } catch (e) { /* ignore */ }
+            }
+
+            // InfluxDB Loggers
+            if (isEnabled('InfluxDBLogger')) {
+                try {
+                    const result = await window.graphqlClient.query(`query { influxdbLoggers { metrics { messagesIn messagesWritten } } }`);
+                    const loggers = result.influxdbLoggers || [];
+                    const totalIn = loggers.reduce((sum, l) => sum + (l.metrics?.messagesIn || 0), 0);
+                    const totalOut = loggers.reduce((sum, l) => sum + (l.metrics?.messagesWritten || 0), 0);
+                    if (loggers.length > 0) loggerCards.push(`<div class="metric-card"><div class="metric-header"><span class="metric-title">InfluxDB Loggers</span><div class="metric-icon">📈</div></div><div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(totalIn)}</span> / <span style="color: #6366F1;">${this.formatNumber(totalOut)}</span></div><div class="metric-label">In / Written (${loggers.length})</div></div>`);
+                } catch (e) { /* ignore */ }
+            }
+
+            // TimeBase Loggers
+            if (isEnabled('TimeBaseLogger')) {
+                try {
+                    const result = await window.graphqlClient.query(`query { timebaseLoggers { metrics { messagesIn messagesWritten } } }`);
+                    const loggers = result.timebaseLoggers || [];
+                    const totalIn = loggers.reduce((sum, l) => sum + (l.metrics?.messagesIn || 0), 0);
+                    const totalOut = loggers.reduce((sum, l) => sum + (l.metrics?.messagesWritten || 0), 0);
+                    if (loggers.length > 0) loggerCards.push(`<div class="metric-card"><div class="metric-header"><span class="metric-title">TimeBase Loggers</span><div class="metric-icon">⏱️</div></div><div class="metric-value"><span style="color: ${cIn};">${this.formatNumber(totalIn)}</span> / <span style="color: #6366F1;">${this.formatNumber(totalOut)}</span></div><div class="metric-label">In / Written (${loggers.length})</div></div>`);
+                } catch (e) { /* ignore */ }
+            }
+
+            if (loggerCards.length > 0) {
+                container.innerHTML = loggerCards.join('');
+                section.style.display = '';
+            } else {
+                container.innerHTML = '';
+                section.style.display = 'none';
+            }
+        } catch (e) {
+            console.error('Failed to update logger metrics:', e);
+        }
     }
 
     updateBrokerTable(brokers) {
@@ -581,6 +670,8 @@ class DashboardManager {
             'th-opcua-io':  colVisible('OpcUa') || colVisible('OpcUaServer'),
             'th-winccoa-io': colVisible('WinCCOa'),
             'th-winccua-io': colVisible('WinCCUa'),
+            'th-nats-io':   colVisible('Nats'),
+            'th-redis-io':  colVisible('Redis'),
         };
         if (table) {
             Object.entries(colMap).forEach(([id, visible]) => {
@@ -616,6 +707,8 @@ class DashboardManager {
                     ${td(colVisible('OpcUa') || colVisible('OpcUaServer'), `<span style="color: #14B8A6;">${this.formatNumber(metrics.opcUaClientIn || 0)}</span> / <span style="color: #9333EA;">${this.formatNumber(metrics.opcUaClientOut || 0)}</span>`)}
                     ${td(colVisible('WinCCOa'), `<span style="color: #EC4899;">${this.formatNumber(metrics.winCCOaClientIn || 0)}</span>`)}
                     ${td(colVisible('WinCCUa'), `<span style="color: #A78BFA;">${this.formatNumber(metrics.winCCUaClientIn || 0)}</span>`)}
+                    ${td(colVisible('Nats'), `<span style="color: #F59E0B;">${this.formatNumber(metrics.natsClientIn || 0)}</span> / <span style="color: #F59E0B;">${this.formatNumber(metrics.natsClientOut || 0)}</span>`)}
+                    ${td(colVisible('Redis'), `<span style="color: #6366F1;">${this.formatNumber(metrics.redisClientIn || 0)}</span> / <span style="color: #6366F1;">${this.formatNumber(metrics.redisClientOut || 0)}</span>`)}
                     <td>${featureWarning}</td>
                 </tr>`;
         }).join('');
@@ -639,7 +732,7 @@ class DashboardManager {
     formatNumber(num) {
         if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
         if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-        return num.toString();
+        return (Math.round(num * 10) / 10).toString();
     }
 
     async loadArchiveGroups() {

@@ -98,9 +98,6 @@ class MqttClient(
     val clientId: String
         get() = endpoint.clientIdentifier()
 
-    init {
-        logger.level = Const.DEBUG_LEVEL
-    }
 
     companion object {
         const val MAX_IN_FLIGHT_MESSAGES = 100_000 // TODO make this configurable
@@ -923,6 +920,13 @@ class MqttClient(
         // Check system topic restrictions
         if (topicName.startsWith(Const.SYS_TOPIC_NAME)) {
             logger.warning { "Client [$clientId] Publish: message for system topic [$topicName] not allowed! [${Utils.getCurrentFunctionName()}]" }
+            return
+        }
+
+        // MQTT spec §3.3.2.1: Topic Name in PUBLISH MUST NOT contain wildcard characters '+' or '#'
+        if (topicName.contains('+') || topicName.contains('#')) {
+            logger.warning { "Client [$clientId] Publish: topic [$topicName] contains wildcard characters - protocol violation [${Utils.getCurrentFunctionName()}]" }
+            sessionHandler.disconnectClient(clientId, "Publish topic contains wildcard characters")
             return
         }
         

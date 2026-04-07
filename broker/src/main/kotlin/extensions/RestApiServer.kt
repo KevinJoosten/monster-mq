@@ -43,7 +43,7 @@ class RestApiServer(
     private val retainedStore: IMessageStore?,
     private val userManager: UserManager
 ) {
-    private val logger = Utils.getLogger(this::class.java).also { it.level = Const.DEBUG_LEVEL }
+    private val logger = Utils.getLogger(this::class.java)
 
     companion object {
         private const val API_PREFIX = "/api/v1"
@@ -86,6 +86,7 @@ class RestApiServer(
 
         // Bulk write
         router.post("$API_PREFIX/write").handler { ctx -> handleBulkWrite(ctx) }
+        router.post("$API_PREFIX/write/influx").handler { ctx -> handleInfluxWrite(ctx) }
 
         // Topic routes (wildcard path)
         router.post("$API_PREFIX/topics/*").handler { ctx -> handlePublishRawBody(ctx) }
@@ -349,10 +350,12 @@ class RestApiServer(
         }
 
         val messages = body.getJsonArray("messages")
-        if (messages == null || messages.isEmpty) {
+        val records = body.getJsonArray("records")
+
+        if ((messages == null || messages.isEmpty) && (records == null || records.isEmpty)) {
             ctx.response().setStatusCode(400)
                 .putHeader("Content-Type", "application/json")
-                .end(errorJson("'messages' array is required and must not be empty"))
+                .end(errorJson("'messages' or 'records' array is required and must not be empty"))
             return
         }
 
@@ -360,39 +363,85 @@ class RestApiServer(
         var publishedCount = 0
         val errors = JsonArray()
 
-        for (i in 0 until messages.size()) {
-            val msg = messages.getJsonObject(i) ?: continue
-            val topic = msg.getString("topic")
-            val value = msg.getString("value")
-
-            if (topic == null || value == null) {
-                errors.add(JsonObject().put("index", i).put("error", "Missing topic or value"))
-                continue
+        // Process object-based messages
+        if (messages != null && !messages.isEmpty) {
+            for (i in 0 until messages.size()) {
+                val msg = messages.getJsonObject(i) ?: continue
+                val topic = msg.getString("topic")
+                val value = msg.getValue("value")?.toString()
+    
+                if (topic == null || value == null) {
+                    errors.add(JsonObject().put("index", i).put("error", "Missing topic or value"))
+                    continue
+                }
+    
+                // ACL check per message
+                if (userManager.isUserManagementEnabled() && !userManager.canPublish(username, topic)) {
+                    errors.add(JsonObject().put("index", i).put("error", "Publish not allowed on topic: $topic"))
+                    continue
+                }
+    
+                val qos = msg.getInteger("qos", 0)
+                val retain = msg.getBoolean("retain", false)
+    
+                val brokerMessage = BrokerMessage(
+                    messageUuid = Utils.getUuid(),
+                    messageId = 0,
+                    topicName = topic,
+                    payload = value.toByteArray(),
+                    qosLevel = qos.coerceIn(0, 2),
+                    isRetain = retain,
+                    isDup = false,
+                    isQueued = false,
+                    clientId = "$REST_CLIENT_PREFIX$username"
+                )
+    
+                sessionHandler.publishMessage(brokerMessage)
+                publishedCount++
             }
+        }
 
-            // ACL check per message
-            if (userManager.isUserManagementEnabled() && !userManager.canPublish(username, topic)) {
-                errors.add(JsonObject().put("index", i).put("error", "Publish not allowed on topic: $topic"))
-                continue
+        // Process compressed array-based records
+        if (records != null && !records.isEmpty) {
+            for (i in 0 until records.size()) {
+                val record = try { records.getJsonArray(i) } catch(e: Exception) { null }
+                if (record == null) {
+                    errors.add(JsonObject().put("index", i).put("error", "Record must be an array"))
+                    continue
+                }
+
+                val topic = try { if (record.size() > 0) record.getString(0) else null } catch(e: Exception) { null }
+                val value = try { if (record.size() > 1) record.getValue(1)?.toString() else null } catch(e: Exception) { null }
+
+                if (topic == null || value == null) {
+                    errors.add(JsonObject().put("index", i).put("error", "Missing topic or value in record"))
+                    continue
+                }
+
+                // ACL check per message
+                if (userManager.isUserManagementEnabled() && !userManager.canPublish(username, topic)) {
+                    errors.add(JsonObject().put("index", i).put("error", "Publish not allowed on topic: $topic"))
+                    continue
+                }
+
+                val qos = try { if (record.size() > 2) record.getInteger(2) ?: 0 else 0 } catch(e: Exception) { 0 }
+                val retain = try { if (record.size() > 3) record.getBoolean(3) ?: false else false } catch(e: Exception) { false }
+
+                val brokerMessage = BrokerMessage(
+                    messageUuid = Utils.getUuid(),
+                    messageId = 0,
+                    topicName = topic,
+                    payload = value.toByteArray(),
+                    qosLevel = qos.coerceIn(0, 2),
+                    isRetain = retain,
+                    isDup = false,
+                    isQueued = false,
+                    clientId = "$REST_CLIENT_PREFIX$username"
+                )
+
+                sessionHandler.publishMessage(brokerMessage)
+                publishedCount++
             }
-
-            val qos = msg.getInteger("qos", 0)
-            val retain = msg.getBoolean("retain", false)
-
-            val brokerMessage = BrokerMessage(
-                messageUuid = Utils.getUuid(),
-                messageId = 0,
-                topicName = topic,
-                payload = value.toByteArray(),
-                qosLevel = qos.coerceIn(0, 2),
-                isRetain = retain,
-                isDup = false,
-                isQueued = false,
-                clientId = "$REST_CLIENT_PREFIX$username"
-            )
-
-            sessionHandler.publishMessage(brokerMessage)
-            publishedCount++
         }
 
         val response = JsonObject()
@@ -406,6 +455,164 @@ class RestApiServer(
         ctx.response().setStatusCode(200)
             .putHeader("Content-Type", "application/json")
             .end(response.encode())
+    }
+
+    // ========== InfluxDB Line Protocol Handler ==========
+
+    private fun handleInfluxWrite(ctx: RoutingContext) {
+        val body = ctx.body()?.asString()
+        if (body.isNullOrBlank()) {
+            ctx.response().setStatusCode(400)
+                .putHeader("Content-Type", "application/json")
+                .end(errorJson("Empty body"))
+            return
+        }
+
+        val username = ctx.get<String>("username") ?: "anonymous"
+        val format = ctx.request().getParam("format") ?: "simple"
+        val baseTopicParam = ctx.request().getParam("base")
+        val baseTopic = if (baseTopicParam.isNullOrBlank()) "" else if (baseTopicParam.endsWith("/")) baseTopicParam else "$baseTopicParam/"
+        val qos = ctx.request().getParam("qos")?.toIntOrNull()?.coerceIn(0, 2) ?: 0
+        val retain = ctx.request().getParam("retain")?.toBoolean() ?: false
+
+        var publishedCount = 0
+        val errors = JsonArray()
+
+        val lines = body.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+        for ((index, line) in lines.withIndex()) {
+            // Split by unescaped space (simplistic Influx parsing)
+            val parts = line.split(Regex(" (?=([^\"]*\"[^\"]*\")*[^\"]*$)"))
+            if (parts.size < 2) {
+                errors.add(JsonObject().put("index", index).put("error", "Invalid line protocol format"))
+                continue
+            }
+
+            val measAndTags = parts[0]
+            val fieldsStr = parts[1]
+            val timestampStr = if (parts.size > 2) parts[2] else null
+
+            val mtParts = measAndTags.split(",")
+            val measurement = mtParts[0]
+
+            // Preserve tags in their original order
+            val tagsPath = mtParts.drop(1).map {
+                val kv = it.split("=")
+                if (kv.size == 2) kv[1] else ""
+            }.filter { it.isNotEmpty() }.joinToString("/")
+
+            val measurementTopic = if (tagsPath.isEmpty()) measurement else "$measurement/$tagsPath"
+            val fullBaseTopic = "$baseTopic$measurementTopic"
+
+            // Parse fields
+            val fields = fieldsStr.split(Regex(",(?=([^\"]*\"[^\"]*\")*[^\"]*$)"))
+            val parsedFields = mutableMapOf<String, String>()
+            for (field in fields) {
+                val kv = field.split(Regex("=(?=([^\"]*\"[^\"]*\")*[^\"]*$)"), 2)
+                if (kv.size == 2) {
+                    // Remove quotes and InfluxDB trailing 'i' for integers
+                    val cleanValue = kv[1].removeSurrounding("\"").let {
+                        if (it.matches(Regex("-?\\d+i"))) it.dropLast(1) else it
+                    }
+                    parsedFields[kv[0]] = cleanValue
+                }
+            }
+
+            if (parsedFields.isEmpty()) {
+                errors.add(JsonObject().put("index", index).put("error", "No valid fields found"))
+                continue
+            }
+
+            if (format.lowercase() == "json") {
+                // Publish single JSON payload
+                // ACL check
+                if (userManager.isUserManagementEnabled() && !userManager.canPublish(username, fullBaseTopic)) {
+                    errors.add(JsonObject().put("index", index).put("error", "Publish not allowed on topic: $fullBaseTopic"))
+                    continue
+                }
+
+                val payloadObj = JsonObject()
+                parsedFields.forEach { (k, v) ->
+                    when {
+                        v.equals("true", ignoreCase = true) -> payloadObj.put(k, true)
+                        v.equals("false", ignoreCase = true) -> payloadObj.put(k, false)
+                        v.matches(Regex("-?\\d+")) -> payloadObj.put(k, v.toLong())
+                        v.matches(Regex("-?\\d+\\.\\d+")) -> payloadObj.put(k, v.toDouble())
+                        else -> payloadObj.put(k, v)
+                    }
+                }
+                if (timestampStr != null) {
+                    val tsLong = timestampStr.toLongOrNull()
+                    if (tsLong != null) {
+                        payloadObj.put("timestamp_ns", tsLong)
+                        try {
+                            // Smart detect precision based on length (Influx defaults to ns = 19 digits)
+                            val instant = when {
+                                timestampStr.length <= 10 -> Instant.ofEpochSecond(tsLong)
+                                timestampStr.length <= 13 -> Instant.ofEpochMilli(tsLong)
+                                timestampStr.length <= 16 -> Instant.ofEpochSecond(tsLong / 1_000_000, (tsLong % 1_000_000) * 1_000)
+                                else -> Instant.ofEpochSecond(tsLong / 1_000_000_000, tsLong % 1_000_000_000)
+                            }
+                            payloadObj.put("timestamp", instant.toString())
+                        } catch (e: Exception) {
+                            payloadObj.put("timestamp", timestampStr)
+                        }
+                    } else {
+                        payloadObj.put("timestamp", timestampStr)
+                    }
+                }
+
+                val brokerMessage = BrokerMessage(
+                    messageUuid = Utils.getUuid(),
+                    messageId = 0,
+                    topicName = fullBaseTopic,
+                    payload = payloadObj.encode().toByteArray(),
+                    qosLevel = qos,
+                    isRetain = retain,
+                    isDup = false,
+                    isQueued = false,
+                    clientId = "$REST_CLIENT_PREFIX$username"
+                )
+                sessionHandler.publishMessage(brokerMessage)
+                publishedCount++
+            } else {
+                // Default simple format: unroll fields to subtopics
+                for ((fieldKey, fieldValue) in parsedFields) {
+                    val topic = "$fullBaseTopic/$fieldKey"
+
+                    // ACL check
+                    if (userManager.isUserManagementEnabled() && !userManager.canPublish(username, topic)) {
+                        errors.add(JsonObject().put("index", index).put("error", "Publish not allowed on topic: $topic"))
+                        continue
+                    }
+
+                    val brokerMessage = BrokerMessage(
+                        messageUuid = Utils.getUuid(),
+                        messageId = 0,
+                        topicName = topic,
+                        payload = fieldValue.toByteArray(), // Value sent raw as byte array
+                        qosLevel = qos,
+                        isRetain = retain,
+                        isDup = false,
+                        isQueued = false,
+                        clientId = "$REST_CLIENT_PREFIX$username"
+                    )
+                    sessionHandler.publishMessage(brokerMessage)
+                    publishedCount++
+                }
+            }
+        }
+
+        if (errors.isEmpty) {
+            ctx.response().setStatusCode(204).end() // Standard InfluxDB success code
+        } else {
+            val response = JsonObject()
+                .put("success", false)
+                .put("count", publishedCount)
+                .put("errors", errors)
+            ctx.response().setStatusCode(200)
+                .putHeader("Content-Type", "application/json")
+                .end(response.encode())
+        }
     }
 
     // ========== Read Handler ==========

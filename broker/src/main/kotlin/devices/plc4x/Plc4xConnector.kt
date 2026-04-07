@@ -60,6 +60,7 @@ class Plc4xConnector : AbstractVerticle() {
     private var driverManager: PlcDriverManager? = null
 
     // Connection state
+    @Volatile private var isStopped = false
     private var isConnected = false
     private var isReconnecting = false
     private var reconnectTimerId: Long? = null
@@ -123,6 +124,7 @@ class Plc4xConnector : AbstractVerticle() {
 
     override fun stop(stopPromise: Promise<Void>) {
         logger.info("Stopping Plc4xConnector for device: ${deviceConfig.name}")
+        isStopped = true
 
         // Cancel any pending timers
         reconnectTimerId?.let { timerId ->
@@ -281,6 +283,7 @@ class Plc4xConnector : AbstractVerticle() {
     }
 
     private fun scheduleReconnection() {
+        if (isStopped) return
         if (!isReconnecting) {
             // Cancel any existing reconnection timer
             reconnectTimerId?.let { timerId ->
@@ -337,6 +340,7 @@ class Plc4xConnector : AbstractVerticle() {
     }
 
     private fun pollAddresses() {
+        if (isStopped) return
         if (!isConnected || connection == null) {
             return
         }
@@ -350,6 +354,7 @@ class Plc4xConnector : AbstractVerticle() {
         }
 
         vertx.executeBlocking<Unit> {
+            if (isStopped) return@executeBlocking
             try {
                 // Create read request builder
                 val requestBuilder = connection!!.readRequestBuilder()
@@ -363,13 +368,40 @@ class Plc4xConnector : AbstractVerticle() {
                 val readRequest = requestBuilder.build()
                 val responseFuture = readRequest.execute()
 
-                // Wait for response
-                val response = responseFuture.get()
+                // Wait for response with timeout to prevent blocking the worker thread indefinitely
+                val timeoutMs = maxOf(plc4xConfig.pollingInterval * 3, 30_000L)
+                val response = try {
+                    responseFuture.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                } catch (e: java.util.concurrent.TimeoutException) {
+                    logger.warning("PLC4X read request timed out after ${timeoutMs}ms for device ${deviceConfig.name}, scheduling reconnection")
+                    responseFuture.cancel(true)
+                    isConnected = false
+                    scheduleReconnection()
+                    return@executeBlocking
+                } catch (e: java.util.concurrent.ExecutionException) {
+                    // PLC4X internal error (e.g. NPE in tag response mapping) — not a connection loss
+                    val cause = e.cause
+                    if (cause is NullPointerException || cause is IllegalArgumentException || cause is IllegalStateException) {
+                        logger.warning("PLC4X internal error during read (${cause.javaClass.simpleName}): ${cause.message}")
+                        return@executeBlocking
+                    }
+                    throw e // other ExecutionExceptions may indicate connection loss
+                }
+
+                // Abort if stopped while waiting for response
+                if (isStopped) return@executeBlocking
+
+                logger.fine { "PLC4X read response tagNames: ${response.tagNames}" }
 
                 // Process response for each address
                 enabledAddresses.forEach { address ->
                     try {
-                        val responseCode = response.getResponseCode(address.name)
+                        val responseCode = try {
+                            response.getResponseCode(address.name)
+                        } catch (e: Exception) {
+                            logger.warning("Failed to get response code for '${address.name}' (address: ${address.address}): ${e.message} — response tagNames: ${response.tagNames}")
+                            return@forEach
+                        }
                         if (responseCode == PlcResponseCode.OK) {
                             val value = response.getObject(address.name)
                             if (value != null) {
@@ -386,7 +418,8 @@ class Plc4xConnector : AbstractVerticle() {
                 Unit // Return Unit
 
             } catch (e: Exception) {
-                logger.severe("Error polling addresses: ${e.message}")
+                if (isStopped) return@executeBlocking
+                logger.log(java.util.logging.Level.SEVERE, "Error polling addresses", e)
                 // Connection might be lost - schedule reconnection
                 isConnected = false
                 scheduleReconnection()
@@ -511,7 +544,7 @@ class Plc4xConnector : AbstractVerticle() {
         }
 
         if (writeAddresses.isEmpty()) {
-            logger.info("No addresses configured for WRITE mode for device ${deviceConfig.name}")
+            logger.fine("No addresses configured for WRITE mode for device ${deviceConfig.name}")
             return
         }
 
@@ -521,7 +554,9 @@ class Plc4xConnector : AbstractVerticle() {
             val clientId = "plc4x-connector-${deviceConfig.name}"
 
             // Register eventBus consumer for this PLC4X connector (handles both individual and bulk messages)
-            vertx.eventBus().consumer<Any>(at.rocworks.bus.EventBusAddresses.Client.messages(clientId)) { busMessage ->
+            val consumerAddress = at.rocworks.bus.EventBusAddresses.Client.messages(clientId)
+            logger.info("Registering eventBus consumer for PLC4X writes at address: $consumerAddress")
+            vertx.eventBus().consumer<Any>(consumerAddress) { busMessage ->
                 try {
                     val messages = when (val body = busMessage.body()) {
                         is BrokerMessage -> listOf(body)
@@ -531,6 +566,7 @@ class Plc4xConnector : AbstractVerticle() {
                             emptyList()
                         }
                     }
+                    logger.fine { "PLC4X write consumer received ${messages.size} message(s) for device ${deviceConfig.name}" }
                     messages.forEach { message ->
                         // Find the address config for this topic
                         val address = subscribedTopics.values.find { addr ->
@@ -539,6 +575,8 @@ class Plc4xConnector : AbstractVerticle() {
                         }
                         if (address != null) {
                             handleMqttMessage(address, message)
+                        } else {
+                            logger.fine("Received MQTT write message for topic '${message.topicName}', but no PLC4X address matched on device ${deviceConfig.name}")
                         }
                     }
                 } catch (e: Exception) {
@@ -556,7 +594,7 @@ class Plc4xConnector : AbstractVerticle() {
 
                 val qos = address.qos
 
-                logger.info("Internal subscription for PLC4X client '$clientId' to MQTT topic '$mqttTopic' with QoS $qos (mode: ${address.mode})")
+                logger.fine("Internal subscription for PLC4X client '$clientId' to MQTT topic '$mqttTopic' with QoS $qos (mode: ${address.mode})")
 
                 sessionHandler.subscribeInternalClient(clientId, mqttTopic, qos)
 
@@ -571,6 +609,7 @@ class Plc4xConnector : AbstractVerticle() {
      * Handle incoming MQTT message and write value to PLC
      */
     private fun handleMqttMessage(address: Plc4xAddress, message: BrokerMessage) {
+        if (isStopped) return
         try {
             if (!isConnected || connection == null) {
                 logger.warning("Cannot write to PLC - not connected (address: ${address.name})")
@@ -578,70 +617,120 @@ class Plc4xConnector : AbstractVerticle() {
             }
 
             // Parse the MQTT payload to extract the value
-            val payloadString = String(message.payload)
-            val value = try {
-                val json = JsonObject(payloadString)
-                json.getValue("value")
-            } catch (e: Exception) {
-                // If not JSON, try to parse as plain value
-                payloadString.toDoubleOrNull() ?: payloadString
+            val payloadString = String(message.payload).trim()
+            logger.fine("Received PLC write message for ${address.name} on topic ${message.topicName}: $payloadString")
+            val value = if (!address.jsonPath.isNullOrBlank()) {
+                // Extract value from JSON using configured path (supports dot notation, e.g. "data.value")
+                try {
+                    val json = JsonObject(payloadString)
+                    extractJsonValue(json, address.jsonPath)
+                        ?: run {
+                            logger.warning("JSON path '${address.jsonPath}' not found in payload for address ${address.name}")
+                            return
+                        }
+                } catch (e: Exception) {
+                    logger.warning("Failed to parse JSON payload for address ${address.name} with jsonPath '${address.jsonPath}': ${e.message}")
+                    return
+                }
+            } else {
+                try {
+                    val json = JsonObject(payloadString)
+                    if (json.containsKey("value")) {
+                        json.getValue("value")
+                    } else {
+                        payloadString
+                    }
+                } catch (e: Exception) {
+                    // If not JSON, try to parse as plain value
+                    payloadString
+                }
             }
 
-            // Loop prevention for READ_WRITE mode
+            // Loop prevention for READ_WRITE mode — compare as doubles to handle type
+            // differences (PLC4X returns Short/Integer/Float, JSON parsing returns Integer/Double).
+            // Use epsilon for float tolerance (Float→JSON→Double loses precision).
             if (address.mode == Plc4xAddressMode.READ_WRITE) {
                 val lastReadValue = lastReadValues[address.name]
-                if (lastReadValue != null && lastReadValue == value) {
-                    // This value came from our own read - don't write it back to avoid loop
-                    logger.finest("Skipping PLC write for ${address.name} - value matches last read (loop prevention): $value")
-                    return
+                if (lastReadValue != null) {
+                    val lastNum = (lastReadValue as? Number)?.toDouble()
+                    val valueNum = (value as? Number)?.toDouble()
+                    if (lastNum != null && valueNum != null) {
+                        val epsilon = if (lastReadValue is Float || value is Float) 1e-5 else 0.0
+                        if (kotlin.math.abs(lastNum - valueNum) <= epsilon) {
+                            logger.finest("Skipping PLC write for ${address.name} - value matches last read (loop prevention): $value")
+                            return
+                        }
+                    } else if (lastNum == null && valueNum == null && lastReadValue.toString() == value.toString()) {
+                        logger.finest("Skipping PLC write for ${address.name} - value matches last read (loop prevention): $value")
+                        return
+                    }
                 }
             }
 
             // Convert value to appropriate type for PLC
-            val plcValue = when (value) {
-                is Number -> {
-                    // Apply reverse transformation (undo scaling and offset)
-                    if (address.scalingFactor != null || address.offset != null) {
-                        address.reverseTransformValue(value)
-                    } else {
-                        value
-                    }
-                }
-                is String -> value.toDoubleOrNull() ?: value
-                else -> value
-            }
+            val plcValue = coerceWriteValue(address, value)
 
-            // Write to PLC using blocking call
-            vertx.executeBlocking<Unit> {
+            // Write to PLC — unordered so writes don't queue behind read polls
+            // (PLC4X handles request serialization internally)
+            logger.fine { "Queuing PLC write for ${address.name} = $plcValue (${plcValue?.javaClass?.simpleName})" }
+            vertx.executeBlocking(java.util.concurrent.Callable<Unit> {
+                if (isStopped) return@Callable
+                val conn = connection
+                if (conn == null || !isConnected) {
+                    logger.warning("Cannot write to PLC - connection lost before write executed (address: ${address.name})")
+                    return@Callable
+                }
                 try {
                     // Create write request
-                    val requestBuilder = connection!!.writeRequestBuilder()
+                    logger.fine("Writing to PLC address ${address.name} (${address.address}) from MQTT topic ${message.topicName}: $plcValue")
+                    val requestBuilder = conn.writeRequestBuilder()
                     requestBuilder.addTagAddress(address.name, address.address, plcValue)
 
                     // Build and execute write request
                     val writeRequest = requestBuilder.build()
                     val responseFuture = writeRequest.execute()
 
-                    // Wait for response
-                    val response = responseFuture.get()
+                    // Wait for response with timeout
+                    val timeoutMs = maxOf(plc4xConfig.pollingInterval * 3, 30_000L)
+                    val response = try {
+                        responseFuture.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    } catch (e: java.util.concurrent.TimeoutException) {
+                        logger.warning("PLC4X write request timed out after ${timeoutMs}ms for ${address.name}")
+                        responseFuture.cancel(true)
+                        throw e
+                    } catch (e: java.util.concurrent.ExecutionException) {
+                        val cause = e.cause
+                        if (cause is NullPointerException || cause is IllegalArgumentException || cause is IllegalStateException) {
+                            logger.warning("PLC4X internal error during write for ${address.name} (${cause.javaClass.simpleName}): ${cause.message}")
+                            return@Callable
+                        }
+                        throw e
+                    }
 
-                    // Check response
-                    val responseCode = response.getResponseCode(address.name)
-                    if (responseCode == PlcResponseCode.OK) {
-                        messagesOutCounter.incrementAndGet()
-                        logger.fine { "Successfully wrote value to PLC: ${address.address} = $plcValue (from MQTT topic ${message.topicName})" }
+                    if (isStopped) return@Callable
+
+                    // Check response safely
+                    if (!response.tagNames.contains(address.name)) {
+                        logger.warning("Failed to write to PLC address ${address.name}: Tag was not found in the write response (possibly rejected by driver due to value type mismatch: ${plcValue?.javaClass?.simpleName})")
                     } else {
-                        logger.warning("Failed to write to PLC address ${address.name}: $responseCode")
+                        val responseCode = response.getResponseCode(address.name)
+                        if (responseCode == PlcResponseCode.OK) {
+                            messagesOutCounter.incrementAndGet()
+                            logger.fine { "Successfully wrote value to PLC: ${address.address} = $plcValue (from MQTT topic ${message.topicName})" }
+                        } else {
+                            logger.warning("Failed to write to PLC address ${address.name}: $responseCode")
+                        }
                     }
 
                     Unit // Return Unit
 
                 } catch (e: Exception) {
+                    if (isStopped) return@Callable
                     logger.severe("Error writing to PLC address ${address.name}: ${e.message}")
                     throw e
                 }
-            }.onComplete { result ->
-                if (result.failed()) {
+            }, false).onComplete { result ->
+                if (result.failed() && !isStopped) {
                     // Connection might be lost - schedule reconnection
                     if (isConnected) {
                         isConnected = false
@@ -652,6 +741,127 @@ class Plc4xConnector : AbstractVerticle() {
 
         } catch (e: Exception) {
             logger.severe("Error handling MQTT message for address ${address.name}: ${e.message}")
+        }
+    }
+
+    /**
+     * Extract a value from a JsonObject using a dot-separated path.
+     * Supports nested navigation, e.g. "data.temperature.value" will navigate
+     * json["data"]["temperature"]["value"].
+     *
+     * @param json The root JSON object
+     * @param path Dot-separated path to the value (e.g. "value", "data.value", "sensor.reading.value")
+     * @return The extracted value, or null if the path doesn't exist
+     */
+    private fun extractJsonValue(json: JsonObject, path: String): Any? {
+        val parts = path.split(".")
+        var current: Any? = json
+        for (part in parts) {
+            when (current) {
+                is JsonObject -> current = current.getValue(part)
+                else -> return null
+            }
+        }
+        return current
+    }
+
+    private fun coerceWriteValue(address: Plc4xAddress, value: Any?): Any? {
+        val parsedValue = when (value) {
+            is String -> parseScalarValue(value)
+            else -> value
+        }
+
+        val transformedValue = when (parsedValue) {
+            is Number -> if (address.scalingFactor != null || address.offset != null) {
+                address.reverseTransformValue(parsedValue)
+            } else {
+                parsedValue
+            }
+            else -> parsedValue
+        }
+
+        if (transformedValue !is Number) {
+            return transformedValue
+        }
+
+        val explicitType = normalizePlcTypeToken(address.address.substringAfterLast(':', ""))
+        val fallbackType = inferTypeFromLastRead(address.name) ?: inferTypeFromParsedValue(parsedValue)
+        return coerceNumericValue(transformedValue.toDouble(), explicitType ?: fallbackType, parsedValue)
+    }
+
+    private fun parseScalarValue(rawValue: String): Any {
+        val trimmed = rawValue.trim()
+        if (trimmed.equals("true", ignoreCase = true)) return true
+        if (trimmed.equals("false", ignoreCase = true)) return false
+        trimmed.toIntOrNull()?.let { return it }
+        trimmed.toLongOrNull()?.let { return it }
+        trimmed.toDoubleOrNull()?.let { return it }
+        return trimmed
+    }
+
+    private fun normalizePlcTypeToken(token: String): String? {
+        return when (token.trim().uppercase()) {
+            "BOOL", "BOOLEAN" -> "BOOLEAN"
+            "BYTE", "SINT", "INT8" -> "BYTE"
+            "USINT", "UINT8" -> "USHORT"
+            "INT", "INT16", "SHORT" -> "SHORT"
+            "UINT", "UINT16", "WORD" -> "INTEGER"
+            "DINT", "INT32", "INTEGER" -> "INTEGER"
+            "UDINT", "UINT32", "DWORD" -> "LONG"
+            "LINT", "INT64", "LONG" -> "LONG"
+            "REAL", "FLOAT", "FLOAT32" -> "FLOAT"
+            "LREAL", "DOUBLE", "FLOAT64" -> "DOUBLE"
+            else -> null
+        }
+    }
+
+    private fun inferTypeFromLastRead(addressName: String): String? {
+        return when (lastReadValues[addressName]) {
+            is Boolean -> "BOOLEAN"
+            is Byte -> "BYTE"
+            is Short -> "SHORT"
+            is Int -> "INTEGER"
+            is Long -> "LONG"
+            is Float -> "FLOAT"
+            is Double -> "DOUBLE"
+            else -> null
+        }
+    }
+
+    private fun inferTypeFromParsedValue(value: Any?): String? {
+        return when (value) {
+            is Boolean -> "BOOLEAN"
+            is Byte -> "BYTE"
+            is Short -> "SHORT"
+            is Int -> "INTEGER"
+            is Long -> "LONG"
+            is Float -> "FLOAT"
+            is Double -> if (value % 1.0 == 0.0) "INTEGER" else "DOUBLE"
+            else -> null
+        }
+    }
+
+    private fun coerceNumericValue(number: Double, targetType: String?, originalValue: Any?): Any {
+        return when (targetType) {
+            "BOOLEAN" -> number != 0.0
+            "BYTE" -> number.toInt().toByte()
+            "USHORT" -> number.toInt().coerceIn(0, 255)
+            "SHORT" -> number.toInt().toShort()
+            "INTEGER" -> number.toInt()
+            "LONG" -> number.toLong()
+            "FLOAT" -> number.toFloat()
+            "DOUBLE" -> number
+            else -> when (originalValue) {
+                is Int -> number.toInt()
+                is Long -> number.toLong()
+                is Float -> number.toFloat()
+                is Double -> number
+                else -> if (number % 1.0 == 0.0 && number >= Int.MIN_VALUE && number <= Int.MAX_VALUE) {
+                    number.toInt()
+                } else {
+                    number
+                }
+            }
         }
     }
 }

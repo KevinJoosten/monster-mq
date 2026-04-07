@@ -26,5 +26,7 @@ object Const {
     
     const val ANONYMOUS_USER = "Anonymous"
 
-    var DEBUG_LEVEL: Level = Level.INFO
+    @Volatile
+    var DEBUG_LEVEL: Level? = null
+
 }

@@ -33,6 +33,10 @@ import at.rocworks.graphql.Neo4jClientConfigQueries
 import at.rocworks.graphql.Neo4jClientConfigMutations
 import at.rocworks.graphql.JDBCLoggerQueries
 import at.rocworks.graphql.JDBCLoggerMutations
+import at.rocworks.graphql.InfluxDBLoggerQueries
+import at.rocworks.graphql.InfluxDBLoggerMutations
+import at.rocworks.graphql.TimeBaseLoggerQueries
+import at.rocworks.graphql.TimeBaseLoggerMutations
 import at.rocworks.graphql.NatsClientConfigQueries
 import at.rocworks.graphql.NatsClientConfigMutations
 import at.rocworks.graphql.RedisClientConfigQueries
@@ -273,6 +277,8 @@ class GraphQLServer(
             "schema-mutations.graphqls",   // Mutation type definitions
             "schema-subscriptions.graphqls", // Subscription type definitions
             "schema-flows.graphqls",       // Flow Engine types and operations
+            "schema-influxdb-logger.graphqls", // InfluxDB Logger types and operations
+            "schema-timebase-logger.graphqls", // TimeBase Logger types and operations
             "schema-sparkplugb-decoder.graphqls", // SparkplugB Decoder device types and operations
             "schema-genai.graphqls",       // GenAI integration
             "schema-topic-schema.graphqls", // Topic Schema Governance
@@ -383,6 +389,14 @@ class GraphQLServer(
         // Initialize JDBC Logger resolvers
         val jdbcLoggerQueries = deviceStore?.let { JDBCLoggerQueries(vertx, it) }
         val jdbcLoggerMutations = deviceStore?.let { JDBCLoggerMutations(vertx, it) }
+
+        // Initialize InfluxDB Logger resolvers
+        val influxdbLoggerQueries = deviceStore?.let { InfluxDBLoggerQueries(vertx, it) }
+        val influxdbLoggerMutations = deviceStore?.let { InfluxDBLoggerMutations(vertx, it) }
+
+        // Initialize TimeBase Logger resolvers
+        val timebaseLoggerQueries = deviceStore?.let { TimeBaseLoggerQueries(vertx, it) }
+        val timebaseLoggerMutations = deviceStore?.let { TimeBaseLoggerMutations(vertx, it) }
 
         // Initialize SparkplugB Decoder resolvers
         val sparkplugBDecoderQueries = deviceStore?.let { SparkplugBDecoderQueries(vertx, it) }
@@ -548,6 +562,18 @@ class GraphQLServer(
                     .apply {
                         jdbcLoggerQueries?.let { resolver ->
                             dataFetcher("jdbcLoggers", resolver.jdbcLoggers())
+                        }
+                    }
+                    // InfluxDB Logger queries
+                    .apply {
+                        influxdbLoggerQueries?.let { resolver ->
+                            dataFetcher("influxdbLoggers", resolver.influxdbLoggers())
+                        }
+                    }
+                    // TimeBase Logger queries
+                    .apply {
+                        timebaseLoggerQueries?.let { resolver ->
+                            dataFetcher("timebaseLoggers", resolver.timebaseLoggers())
                         }
                     }
                     // SparkplugB Decoder queries
@@ -767,6 +793,26 @@ class GraphQLServer(
                             }
                         }
                     }
+                    // InfluxDB Logger mutations - grouped under influxdbLogger
+                    .apply {
+                        influxdbLoggerMutations?.let { _ ->
+                            dataFetcher("influxdbLogger") { env ->
+                                val result = authContext.validateFieldAccess(env)
+                                if (!result.allowed) throw GraphQLException(result.errorMessage ?: "Unauthorized")
+                                emptyMap<String, Any>()
+                            }
+                        }
+                    }
+                    // TimeBase Logger mutations - grouped under timebaseLogger
+                    .apply {
+                        timebaseLoggerMutations?.let { _ ->
+                            dataFetcher("timebaseLogger") { env ->
+                                val result = authContext.validateFieldAccess(env)
+                                if (!result.allowed) throw GraphQLException(result.errorMessage ?: "Unauthorized")
+                                emptyMap<String, Any>()
+                            }
+                        }
+                    }
                     // SparkplugB Decoder mutations - grouped under sparkplugBDecoder
                     .apply {
                         sparkplugBDecoderMutations?.let { _ ->
@@ -929,6 +975,7 @@ class GraphQLServer(
                         dataFetcher("toggle", resolver.toggleWinCCOaClient())
                         dataFetcher("reassign", resolver.reassignWinCCOaClient())
                         dataFetcher("addAddress", resolver.addWinCCOaClientAddress())
+                        dataFetcher("updateAddress", resolver.updateWinCCOaClientAddress())
                         dataFetcher("deleteAddress", resolver.deleteWinCCOaClientAddress())
                     }
                 }
@@ -945,6 +992,7 @@ class GraphQLServer(
                         dataFetcher("toggle", resolver.toggleWinCCUaClient())
                         dataFetcher("reassign", resolver.reassignWinCCUaClient())
                         dataFetcher("addAddress", resolver.addWinCCUaClientAddress())
+                        dataFetcher("updateAddress", resolver.updateWinCCUaClientAddress())
                         dataFetcher("deleteAddress", resolver.deleteWinCCUaClientAddress())
                     }
                 }
@@ -991,6 +1039,7 @@ class GraphQLServer(
                         dataFetcher("toggle", resolver.toggle())
                         dataFetcher("reassign", resolver.reassign())
                         dataFetcher("addAddress", resolver.addAddress())
+                        dataFetcher("updateAddress", resolver.updateAddress())
                         dataFetcher("deleteAddress", resolver.deleteAddress())
                     }
                 }
@@ -1020,6 +1069,30 @@ class GraphQLServer(
                         dataFetcher("stop", resolver.stopJDBCLogger())
                         dataFetcher("toggle", resolver.toggleJDBCLogger())
                         dataFetcher("reassign", resolver.reassignJDBCLogger())
+                    }
+                }
+            }
+            // Register InfluxDB Logger Mutations type
+            .type("InfluxDBLoggerMutations") { builder ->
+                builder.apply {
+                    influxdbLoggerMutations?.let { resolver ->
+                        dataFetcher("create", resolver.create())
+                        dataFetcher("update", resolver.update())
+                        dataFetcher("delete", resolver.delete())
+                        dataFetcher("toggle", resolver.toggle())
+                        dataFetcher("reassign", resolver.reassign())
+                    }
+                }
+            }
+            // Register TimeBase Logger Mutations type
+            .type("TimeBaseLoggerMutations") { builder ->
+                builder.apply {
+                    timebaseLoggerMutations?.let { resolver ->
+                        dataFetcher("create", resolver.create())
+                        dataFetcher("update", resolver.update())
+                        dataFetcher("delete", resolver.delete())
+                        dataFetcher("toggle", resolver.toggle())
+                        dataFetcher("reassign", resolver.reassign())
                     }
                 }
             }
@@ -1198,6 +1271,20 @@ class GraphQLServer(
                 builder
                     .dataFetcher("metrics", metricsResolver.jdbcLoggerMetrics())
                     .dataFetcher("metricsHistory", metricsResolver.jdbcLoggerMetricsHistory())
+            }
+            .type("InfluxDBLogger") { builder ->
+                builder.apply {
+                    influxdbLoggerQueries?.let { resolver ->
+                        dataFetcher("metrics", resolver.influxdbLoggerMetrics())
+                    }
+                }
+            }
+            .type("TimeBaseLogger") { builder ->
+                builder.apply {
+                    timebaseLoggerQueries?.let { resolver ->
+                        dataFetcher("metrics", resolver.timebaseLoggerMetrics())
+                    }
+                }
             }
             .type("NatsClient") { builder ->
                 builder.apply {

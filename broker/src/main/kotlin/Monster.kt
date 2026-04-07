@@ -340,10 +340,26 @@ class Monster(args: Array<String>) {
     }
 
     init {
+        Utils.getArgIndex(args, listOf("-log", "--log")).let {
+            if (it != -1) {
+                if (it + 1 >= args.size) {
+                    println("ERROR: -log argument requires a value (e.g. INFO, FINE, FINEST)")
+                    exitProcess(1)
+                }
+                try {
+                    Const.DEBUG_LEVEL = Level.parse(args[it + 1])
+                } catch (e: IllegalArgumentException) {
+                    println("ERROR: Invalid log level '${args[it + 1]}'")
+                    exitProcess(1)
+                }
+            }
+        }
+
         // Check if we're running under JManager (MonsterOA)
         if (MonsterOA.getInstance() == null) {
             Utils.initLogging()
         }
+        Const.DEBUG_LEVEL?.let { logger.level = it }
 
         logger.fine("Monster: Starting with ${args.size} arguments ["+args.joinToString("][")+"]")
 
@@ -406,13 +422,6 @@ class Monster(args: Array<String>) {
         if (deviceConfigsFile != null && deviceConfigsMergeFile != null) {
             println("ERROR: -deviceConfigs and -deviceConfigsMerge cannot be used together")
             exitProcess(1)
-        }
-
-        Utils.getArgIndex(args, listOf("-log", "--log")).let {
-            if (it != -1) {
-                val level = Level.parse(args[it + 1])
-                Const.DEBUG_LEVEL = level
-            }
         }
 
         // Worker pool size (optional)
@@ -560,9 +569,9 @@ OPTIONS:
 
   -cluster              Enable Hazelcast clustering mode for multi-node deployment
 
-  -log <level>          Set logging level
-                        Levels: ALL, FINEST, FINER, FINE, INFO, WARNING, SEVERE
-                        Default: INFO
+  -log <level>          Override logger levels from the command line
+                        Only applied when this argument is passed
+                        Example levels: INFO, FINE, FINER, FINEST, ALL
 
   -workerPoolSize <num> Vert.x worker thread pool size
                         Default: 2×CPU count (e.g., 16 on 8-core machine)
@@ -579,14 +588,14 @@ EXAMPLES:
   # Start with custom config file
   java -classpath target/classes:target/dependencies/* at.rocworks.MonsterKt -config myconfig.yaml
 
-  # Start in cluster mode with debug logging
-  java -classpath target/classes:target/dependencies/* at.rocworks.MonsterKt -cluster -log FINE
-
   # Start with custom worker thread pool size for high load
   java -classpath target/classes:target/dependencies/* at.rocworks.MonsterKt -workerPoolSize 64
 
-  # Start with SQLite configuration and detailed logging
-  java -classpath target/classes:target/dependencies/* at.rocworks.MonsterKt -config config-sqlite.yaml -log FINEST -workerPoolSize 128
+  # Start with temporary debug logging from the command line
+  java -classpath target/classes:target/dependencies/* at.rocworks.MonsterKt -log FINEST
+
+  # Start with SQLite configuration and a custom worker pool size
+  java -classpath target/classes:target/dependencies/* at.rocworks.MonsterKt -config config-sqlite.yaml -workerPoolSize 128
 
 FEATURES:
   • MQTT 3.1.1 Protocol Support with QoS 0, 1, 2
@@ -1121,31 +1130,22 @@ MORE INFO:
                     .compose { vertx.deployVerticle(messageHandler) }
                     .compose { vertx.deployVerticle(sessionHandler) }
                     .compose {
-                        // Configure logging (MQTT and Memory are independent)
+                        // Configure logging (in-memory log capture)
                         val loggingConfig = configJson.getJsonObject("Logging", JsonObject())
-
-                        // Check if either MQTT or Memory logging is enabled
-                        val mqttConfig = loggingConfig.getJsonObject("Mqtt", JsonObject())
-                        val mqttLoggingEnabled = mqttConfig.getBoolean("Enabled", false)
                         val memoryConfig = loggingConfig.getJsonObject("Memory", JsonObject())
                         val memoryLoggingEnabled = memoryConfig.getBoolean("Enabled", false)
 
-                        // Install MqttLogHandler if EITHER MQTT or Memory logging is enabled
-                        // (Memory logging depends on MqttLogHandler to capture logs)
-                        if (mqttLoggingEnabled || memoryLoggingEnabled) {
+                        if (memoryLoggingEnabled) {
                             try {
-                                logger.fine("Installing log handler for system-wide log capture (level: ${Const.DEBUG_LEVEL})...")
-                                val sysLogHandler = SysLogHandler.install()
-
-                                // Set the log level to configured debug level
-                                sysLogHandler.level = Const.DEBUG_LEVEL
-                                logger.info("Log handler installed successfully at ${Const.DEBUG_LEVEL} level (MQTT: $mqttLoggingEnabled, Memory: $memoryLoggingEnabled)")
+                                logger.fine("Installing log handler for system-wide log capture...")
+                                SysLogHandler.install()
+                                logger.info("Log handler installed successfully")
                             } catch (e: Exception) {
                                 logger.severe("Failed to install log handler: ${e.message}")
                                 throw e
                             }
                         } else {
-                            logger.fine("Both MQTT and Memory logging are disabled")
+                            logger.fine("Memory logging is disabled")
                         }
 
                         Future.succeededFuture<String>()
@@ -1159,7 +1159,7 @@ MORE INFO:
 
                         if (memoryEnabled) {
                             logger.fine("Deploying SyslogVerticle with memoryEntries=$memoryEntries")
-                            val syslogVerticle = SyslogVerticle(true, memoryEntries, messageHandler)
+                            val syslogVerticle = SyslogVerticle(true, memoryEntries)
                             vertx.deployVerticle(syslogVerticle)
                         } else {
                             logger.fine("In-memory syslog storage is disabled")
@@ -1173,7 +1173,7 @@ MORE INFO:
                         val featuresConfig = configJson.getJsonObject("Features", JsonObject())
                         val allFeatures = listOf(
                             "OpcUa", "OpcUaServer", "MqttClient", "Kafka", "Nats", "Redis", "Telegram",
-                            "WinCCOa", "WinCCUa", "Plc4x", "Neo4j", "JdbcLogger",
+                            "WinCCOa", "WinCCUa", "Plc4x", "Neo4j", "JdbcLogger", "InfluxDBLogger", "TimeBaseLogger",
                             "SparkplugB", "FlowEngine", "Agents"
                         )
                         val enabled = allFeatures.filter { featuresConfig.getBoolean(it, true) }.toSet()
@@ -1328,6 +1328,28 @@ MORE INFO:
                             vertx.deployVerticle(jdbcLoggerExtension, jdbcLoggerDeploymentOptions)
                         } else {
                             logger.fine("JdbcLogger extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
+                    }
+                    .compose {
+                        // InfluxDB Logger Extension
+                        if (Monster.isFeatureEnabled("InfluxDBLogger")) {
+                            val influxDBLoggerExtension = at.rocworks.logger.InfluxDBLoggerExtension()
+                            val influxDBLoggerDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(influxDBLoggerExtension, influxDBLoggerDeploymentOptions)
+                        } else {
+                            logger.fine("InfluxDBLogger extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
+                    }
+                    .compose {
+                        // TimeBase Logger Extension
+                        if (Monster.isFeatureEnabled("TimeBaseLogger")) {
+                            val timeBaseLoggerExtension = at.rocworks.logger.TimeBaseLoggerExtension()
+                            val timeBaseLoggerDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(timeBaseLoggerExtension, timeBaseLoggerDeploymentOptions)
+                        } else {
+                            logger.fine("TimeBaseLogger extension disabled by Features config")
                             Future.succeededFuture()
                         }
                     }

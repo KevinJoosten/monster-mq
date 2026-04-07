@@ -122,8 +122,9 @@ Response:
 
 ### Bulk write
 
-Publish multiple messages in a single request.
+Publish multiple messages in a single request. The endpoint supports two payload formats:
 
+1. **Standard `messages` format** (array of JSON objects):
 ```bash
 curl -u Admin:Admin -X POST \
   "http://localhost:4000/api/v1/write" \
@@ -133,6 +134,21 @@ curl -u Admin:Admin -X POST \
       {"topic": "sensor/temp", "value": "23.5", "retain": true},
       {"topic": "sensor/humidity", "value": "65", "qos": 1},
       {"topic": "actuator/valve", "value": "open"}
+    ]
+  }'
+```
+
+2. **Compressed `records` format** (array of positional arrays `[topic, value, qos, retain]`):
+This format is highly optimized for performance and high-throughput data ingestion, avoiding the overhead of JSON object keys. The `qos` and `retain` fields are optional and default to `0` and `false`.
+```bash
+curl -u Admin:Admin -X POST \
+  "http://localhost:4000/api/v1/write" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "records": [
+      ["sensor/temp", "23.5", 0, true],
+      ["sensor/humidity", "65", 1],
+      ["actuator/valve", "open"]
     ]
   }'
 ```
@@ -147,6 +163,27 @@ If some messages are invalid (missing `topic` or `value`), valid messages are st
 ```json
 {"success": true, "count": 1, "errors": ["Message at index 0: missing 'topic'", "Message at index 1: missing 'value'"]}
 ```
+
+### InfluxDB Line Protocol
+
+Ingest raw InfluxDB Line Protocol metrics. Telegraf and other Influx-compatible clients can POST directly to this endpoint.
+
+```bash
+curl -u Admin:Admin -X POST \
+  "http://localhost:4000/api/v1/write/influx?base=enterpriseA/siteA/" \
+  -H "Content-Type: text/plain" \
+  -d 'sensor,room=living temp=22.5,hum=50i 123456789'
+```
+
+Query parameters:
+- `base` (optional): Prefix added to the generated MQTT topics.
+- `format` (optional):
+  - `simple` (default): Unrolls fields into multiple basic MQTT topics. From the example: 
+    - Topic: `enterpriseA/siteA/sensor/living/temp` → Payload: `22.5`
+    - Topic: `enterpriseA/siteA/sensor/living/hum` → Payload: `50`
+  - `json`: Creates a single comprehensive JSON payload per line. From the example: 
+    - Topic: `enterpriseA/siteA/sensor/living` 
+    - Payload: `{"temp": 22.5, "hum": 50, "timestamp_ns": 123456789, "timestamp": "1970-01-02T10:17:36.789Z"}`
 
 ## Reading Data
 

@@ -207,26 +207,32 @@ class NatsClientDetailManager {
             tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:1.5rem;color:var(--text-muted);">No address mappings configured.</td></tr>';
             return;
         }
-        tbody.innerHTML = this.addresses.map((addr, idx) => `
-            <tr>
-                <td><span class="mode-badge ${addr.mode === 'SUBSCRIBE' ? 'mode-subscribe' : 'mode-publish'}">${addr.mode}</span></td>
-                <td><code style="font-size:0.85rem;">${this.escapeHtml(addr.natsSubject || '')}</code></td>
-                <td><code style="font-size:0.85rem;">${this.escapeHtml(addr.mqttTopic || '')}</code></td>
-                <td>${addr.qos}</td>
-                <td>${addr.autoConvert ? '✓' : '—'}</td>
-                <td>${addr.removePath ? '✓' : '—'}</td>
-                <td><div class="action-buttons">
-                    <ix-icon-button icon="pen" variant="primary" ghost size="16" title="Edit" onclick="natsDetailManager.showEditAddressModal(${idx})"></ix-icon-button>
-                    <ix-icon-button icon="trashcan" variant="primary" ghost size="16" class="btn-delete" title="Delete" onclick="natsDetailManager.removeAddress(${idx})"></ix-icon-button>
-                </div></td>
-            </tr>
-        `).join('');
+        tbody.innerHTML = this.addresses.map((addr, idx) => {
+            const modeClass = addr.mode === 'SUBSCRIBE' ? 'mode-subscribe' : 'mode-publish';
+            const modeIcon = addr.mode === 'SUBSCRIBE' ? '⬇️' : '⬆️';
+            return `
+                <tr>
+                    <td><span class="mode-badge ${modeClass}">${modeIcon} ${addr.mode}</span></td>
+                    <td><code style="font-size:0.85rem;">${this.escapeHtml(addr.natsSubject || '')}</code></td>
+                    <td><code style="font-size:0.85rem;">${this.escapeHtml(addr.mqttTopic || '')}</code></td>
+                    <td>${addr.qos}</td>
+                    <td>${addr.autoConvert ? '✓' : '—'}</td>
+                    <td>${addr.removePath ? '✓' : '—'}</td>
+                    <td><div class="action-buttons">
+                        <ix-icon-button icon="pen" variant="primary" ghost size="16" title="Edit" onclick="natsDetailManager.showEditAddressModal(${idx})"></ix-icon-button>
+                        <ix-icon-button icon="trashcan" variant="primary" ghost size="16" class="btn-delete" title="Delete" onclick="natsDetailManager.removeAddress(${idx})"></ix-icon-button>
+                    </div></td>
+                </tr>
+            `;
+        }).join('');
     }
 
     showAddAddressModal() {
         this.editingAddressIndex = null;
         this.editingOriginalSubject = null;
         document.getElementById('address-modal-title').textContent = 'Add Address Mapping';
+        const saveBtn = document.getElementById('save-address-btn');
+        if (saveBtn) saveBtn.textContent = 'Add Mapping';
         document.getElementById('addr-mode').value = 'SUBSCRIBE';
         document.getElementById('addr-nats-subject').value = '';
         document.getElementById('addr-mqtt-topic').value = '';
@@ -234,6 +240,7 @@ class NatsClientDetailManager {
         document.getElementById('addr-auto-convert').checked = true;
         document.getElementById('addr-remove-path').checked = true;
         document.getElementById('add-address-form').reset && document.getElementById('add-address-form').reset();
+        this.updateTopicDirection();
         document.getElementById('add-address-modal').style.display = 'flex';
     }
 
@@ -243,13 +250,25 @@ class NatsClientDetailManager {
         this.editingAddressIndex = idx;
         this.editingOriginalSubject = addr.natsSubject;
         document.getElementById('address-modal-title').textContent = 'Edit Address Mapping';
+        const saveBtn = document.getElementById('save-address-btn');
+        if (saveBtn) saveBtn.textContent = 'Update Mapping';
         document.getElementById('addr-mode').value = addr.mode || 'SUBSCRIBE';
         document.getElementById('addr-nats-subject').value = addr.natsSubject || '';
         document.getElementById('addr-mqtt-topic').value = addr.mqttTopic || '';
         document.getElementById('addr-qos').value = String(addr.qos ?? 0);
         document.getElementById('addr-auto-convert').checked = addr.autoConvert !== false;
         document.getElementById('addr-remove-path').checked = addr.removePath !== false;
+        this.updateTopicDirection();
         document.getElementById('add-address-modal').style.display = 'flex';
+    }
+
+    updateTopicDirection() {
+        const mode = document.getElementById('addr-mode')?.value;
+        const arrow = document.querySelector('#addr-topic-direction .direction-arrow');
+        if (arrow) {
+            arrow.textContent = mode === 'SUBSCRIBE' ? '⬇️' : '⬆️';
+            arrow.title = mode === 'SUBSCRIBE' ? 'NATS → MQTT' : 'MQTT → NATS';
+        }
     }
 
     hideAddAddressModal() {
@@ -260,9 +279,9 @@ class NatsClientDetailManager {
 
     async saveAddressMapping() {
         const form = document.getElementById('add-address-form');
+        const mode = document.getElementById('addr-mode').value;
         const natsSubject = document.getElementById('addr-nats-subject').value.trim();
         const mqttTopic = document.getElementById('addr-mqtt-topic').value.trim();
-        const mode = document.getElementById('addr-mode').value;
         
         if (!natsSubject || !mqttTopic) {
             this.showError('NATS Subject and MQTT Topic are required');
@@ -274,6 +293,21 @@ class NatsClientDetailManager {
         if (mode === 'PUBLISH' && (mqttTopic.includes('+') || mqttTopic.includes('#'))) {
             this.showError('Invalid MQTT topic for PUBLISH mode: Topic names cannot contain wildcard characters (+ or #). Wildcards are only allowed in SUBSCRIBE mode.');
             return;
+        }
+
+        // Wildcard validation
+        if (mode === 'SUBSCRIBE') {
+            // NATS -> MQTT: MQTT Topic (Local) must not have MQTT wildcards (+ or #)
+            if (mqttTopic.includes('+') || mqttTopic.includes('#')) {
+                this.showError('MQTT Topic must not contain wildcards (+ or #) in SUBSCRIBE mode.');
+                return;
+            }
+        } else if (mode === 'PUBLISH') {
+            // MQTT -> NATS: NATS Subject (Remote) must not have NATS wildcards (* or >)
+            if (natsSubject.includes('*') || natsSubject.includes('>')) {
+                this.showError('NATS Subject must not contain wildcards (* or >) in PUBLISH mode.');
+                return;
+            }
         }
 
         const newAddr = {

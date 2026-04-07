@@ -245,8 +245,22 @@ class WinCCUaClientDetailManager {
         this.addresses = this.clientData.config.addresses || [];
         this.renderAddresses();
 
+        // Timestamps
+        document.getElementById('timestamps-section').style.display = 'block';
+        document.getElementById('client-created-at').textContent = this.formatDateTime(this.clientData.createdAt);
+        document.getElementById('client-updated-at').textContent = this.formatDateTime(this.clientData.updatedAt);
+
         // Show content
         document.getElementById('client-content').style.display = 'block';
+    }
+
+    formatDateTime(isoString) {
+        if (!isoString) return '-';
+        try {
+            return new Date(isoString).toLocaleString();
+        } catch (e) {
+            return isoString;
+        }
     }
 
     renderAddresses() {
@@ -299,6 +313,7 @@ class WinCCUaClientDetailManager {
                 </td>
                 <td>
                     <div class="action-buttons">
+                        <ix-icon-button icon="pen" variant="primary" ghost size="16" title="Edit Subscription" onclick="clientDetailManager.editAddress(${index})"></ix-icon-button>
                         <ix-icon-button icon="trashcan" variant="primary" ghost size="16" class="btn-delete" title="Delete Subscription" onclick="clientDetailManager.deleteAddress(${index})"></ix-icon-button>
                     </div>
                 </td>
@@ -356,6 +371,7 @@ class WinCCUaClientDetailManager {
         if (!address) return;
 
         this.editingAddressIndex = index;
+        this.originalTopicValue = address.topic;
 
         // Populate form with existing values
         document.getElementById('address-type').value = address.type || '';
@@ -413,46 +429,68 @@ class WinCCUaClientDetailManager {
             addressData.filterString = document.getElementById('address-filter-string').value.trim() || null;
         }
 
+        const isEditing = this.editingAddressIndex !== null;
+        const originalTopic = this.originalTopicValue;
+
         this.hideAddAddressModal();
 
-        // Save immediately to server using addWinCCUaClientAddress mutation
+        // Save immediately to server
         if (this.isNewMode) {
-            this.showError('Please save the client first before adding subscriptions');
+            this.showError('Please save the client first before managing subscriptions');
             return;
         }
 
         try {
-            const mutation = `
-                mutation AddWinCCUaClientAddress($deviceName: String!, $input: WinCCUaAddressInput!) {
-                    winCCUaDevice {
-                        addAddress(deviceName: $deviceName, input: $input) {
-                            success
-                            errors
-                            client {
-                                name
-                                enabled
+            let mutation;
+            let variables;
+
+            if (isEditing) {
+                mutation = `
+                    mutation UpdateWinCCUaClientAddress($deviceName: String!, $topic: String!, $input: WinCCUaAddressInput!) {
+                        winCCUaDevice {
+                            updateAddress(deviceName: $deviceName, topic: $topic, input: $input) {
+                                success
+                                errors
                             }
                         }
                     }
-                }
-            `;
+                `;
+                variables = {
+                    deviceName: this.clientName,
+                    topic: originalTopic,
+                    input: addressData
+                };
+            } else {
+                mutation = `
+                    mutation AddWinCCUaClientAddress($deviceName: String!, $input: WinCCUaAddressInput!) {
+                        winCCUaDevice {
+                            addAddress(deviceName: $deviceName, input: $input) {
+                                success
+                                errors
+                            }
+                        }
+                    }
+                `;
+                variables = {
+                    deviceName: this.clientName,
+                    input: addressData
+                };
+            }
 
-            const result = await this.client.query(mutation, {
-                deviceName: this.clientName,
-                input: addressData
-            });
+            const result = await this.client.query(mutation, variables);
+            const response = isEditing ? result.winCCUaDevice.updateAddress : result.winCCUaDevice.addAddress;
 
-            if (result.winCCUaDevice.addAddress.success) {
+            if (response.success) {
                 // Reload client data to get updated addresses
                 await this.loadClient();
-                this.showSuccess('Subscription added successfully');
+                this.showSuccess(isEditing ? 'Subscription updated successfully' : 'Subscription added successfully');
             } else {
-                const errors = result.winCCUaDevice.addAddress.errors || ['Unknown error'];
-                this.showError('Failed to add subscription: ' + errors.join(', '));
+                const errors = response.errors || ['Unknown error'];
+                this.showError(`Failed to ${isEditing ? 'update' : 'add'} subscription: ` + errors.join(', '));
             }
         } catch (error) {
-            console.error('Error adding subscription:', error);
-            this.showError('Failed to add subscription: ' + error.message);
+            console.error(`Error ${isEditing ? 'updating' : 'adding'} subscription:`, error);
+            this.showError(`Failed to ${isEditing ? 'update' : 'add'} subscription: ` + error.message);
         }
     }
 

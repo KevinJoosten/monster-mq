@@ -37,6 +37,7 @@ build/
 ### Mac OS ###
 .DS_Store
 
+### Logs and databases #
 log/*
 monstermq.db*
 config.yaml
