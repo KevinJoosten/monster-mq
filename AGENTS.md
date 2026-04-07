@@ -57,6 +57,7 @@ pytest mqtt5/     # MQTT v5 tests
 pytest graphql/   # GraphQL API tests
 pytest opcua/     # OPC UA tests
 pytest database/  # Database backend tests
+pytest ui/        # Playwright UI regression tests (requires running broker)
 
 # Run single test
 pytest mqtt3/test_basic_pubsub.py::test_basic_pubsub_qos0 -v
@@ -66,6 +67,31 @@ Test configuration via environment variables:
 ```
 MQTT_BROKER=localhost  MQTT_PORT=1883  MQTT_USERNAME=Test  MQTT_PASSWORD=Test
 GRAPHQL_URL=http://localhost:4000/graphql
+```
+
+#### UI Regression Tests (Playwright)
+```bash
+cd tests
+# Install Playwright browser (one-time)
+pip install -r requirements.txt
+playwright install chromium
+
+# Run UI tests (broker must be running on port 4000)
+export DASHBOARD_USERNAME=Admin DASHBOARD_PASSWORD=Admin  # or set env vars
+pytest ui/ -v
+
+# Without credentials — runs login + dashboard smoke tests via anonymous mode
+pytest ui/ -v
+
+# Headed mode for debugging
+pytest ui/ -v --headed
+```
+
+UI test environment variables:
+```
+DASHBOARD_URL=http://localhost:4000   # default
+DASHBOARD_USERNAME=Admin              # required for MQTT client validation tests
+DASHBOARD_PASSWORD=Admin
 ```
 
 ### Docker Commands

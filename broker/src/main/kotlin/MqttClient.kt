@@ -741,10 +741,7 @@ class MqttClient(
                 if (topic == "#" && !Monster.allowRootWildcardSubscription()) {
                     allowed = false
                     logger.warning("Client [$clientId] Root wildcard subscription '#' rejected (AllowRootWildcardSubscription=false)")
-                }
-
-                // ACL check (only if still allowed so far and user management enabled)
-                if (allowed && userManager.isUserManagementEnabled()) {
+                } else if (userManager.isUserManagementEnabled()) {
                     val isWildcard = topic.contains('+') || topic.contains('#')
                     if (!Monster.aclCheckOnSubscription() && isWildcard) {
                         // Delivery-time ACL mode: skip ACL rule check for wildcard subscriptions,

@@ -15,3 +15,7 @@ pytest-timeout>=2.2.0    # Test timeouts
 pytest-html>=4.1.1       # HTML reports
 pytest-cov>=4.1.0        # Coverage reports
 pytest-mock>=3.12.0      # Mocking support
+
+# UI / Browser Testing
+pytest-playwright>=0.6.2  # Playwright fixtures for pytest
+playwright>=1.52.0        # Browser automation (run: playwright install chromium)
