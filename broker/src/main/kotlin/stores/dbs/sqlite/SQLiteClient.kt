@@ -5,6 +5,7 @@ import io.vertx.core.Future
 import io.vertx.core.Vertx
 import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
+import java.io.File
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.Types
@@ -22,23 +23,20 @@ import java.util.concurrent.TimeUnit
 class SQLiteClient(private val vertx: Vertx, private val dbPath: String) {
     private val logger = Utils.getLogger(this::class.java)
 
-    /** Connection path resolved at construction time when the working directory is correct. */
-    private val connectionPath: String = SQLiteDatabasePath.connectionPath(dbPath)
-    private val isMemoryDatabase: Boolean = SQLiteDatabasePath.isMemory(dbPath)
+    /** Absolute path to the DB file, resolved at construction time when the working directory is correct. */
+    private val absoluteDbPath: String = File(dbPath).absolutePath
 
     /** Direct read-only JDBC connection for synchronous queries (thread-safe for reads in WAL mode) */
     private val readConnection: Connection by lazy {
-        val conn = DriverManager.getConnection(SQLiteDatabasePath.jdbcUrl(dbPath), "", "")
+        val conn = DriverManager.getConnection("jdbc:sqlite:$absoluteDbPath", "", "")
         conn.createStatement().use { stmt ->
-            if (!isMemoryDatabase) {
-                stmt.executeUpdate("PRAGMA journal_mode = WAL")
-            }
+            stmt.executeUpdate("PRAGMA journal_mode = WAL")
             stmt.executeUpdate("PRAGMA synchronous = NORMAL")
             stmt.executeUpdate("PRAGMA cache_size = -16000")
             stmt.executeUpdate("PRAGMA query_only = ON")
             stmt.executeUpdate("PRAGMA busy_timeout = 5000")
         }
-        logger.info { "Created direct read-only SQLite connection for [$connectionPath]" }
+        logger.info { "Created direct read-only SQLite connection for [$absoluteDbPath]" }
         conn
     }
     
@@ -100,66 +98,50 @@ class SQLiteClient(private val vertx: Vertx, private val dbPath: String) {
      * Execute a SELECT query synchronously (for interface compatibility)
      * WARNING: This blocks the current thread - use sparingly!
      */
-     fun executeQuerySync(sql: String, params: JsonArray = JsonArray(), timeoutMs: Long = 30000): JsonArray {
-         return try {
-             executeQuery(sql, params)
-                 .toCompletionStage()
-                 .toCompletableFuture()
-                 .get(timeoutMs, TimeUnit.MILLISECONDS)
-         } catch (e: Exception) {
-             logger.warning("Sync query failed [$sql]: ${e.message}")
-             JsonArray()
-         }
-     }
- 
-     fun executeUpdateSync(sql: String, params: JsonArray = JsonArray(), timeoutMs: Long = 30000): Int {
-         return try {
-             executeUpdate(sql, params)
-                 .toCompletionStage()
-                 .toCompletableFuture()
-                 .get(timeoutMs, TimeUnit.MILLISECONDS)
-         } catch (e: Exception) {
-             logger.warning("Sync update failed [$sql]: ${e.message}")
-             0
-         }
-     }
- 
-     /**
-      * Execute batch updates (multiple statements with different parameters)
-      */
-     fun executeBatch(sql: String, batchParams: JsonArray): Future<JsonArray> {
-         val request = JsonObject()
-             .put("dbPath", dbPath)
-             .put("sql", sql)
-             .put("batchParams", batchParams)
- 
-         return vertx.eventBus()
-             .request<JsonObject>(SQLiteVerticle.EB_EXECUTE_BATCH, request)
-             .map { message ->
-                 val response = message.body()
-                 if (response.getBoolean("success", false)) {
-                     response.getJsonArray("results", JsonArray())
-                 } else {
-                     throw RuntimeException("SQL batch failed: $sql")
-                 }
-             }
-     }
- 
-     /**
-      * Execute batch updates synchronously.
-      * WARNING: This blocks the current thread - use with care!
-      */
-     fun executeBatchSync(sql: String, batchParams: JsonArray, timeoutMs: Long = 30000): JsonArray {
-         return try {
-             executeBatch(sql, batchParams)
-                 .toCompletionStage()
-                 .toCompletableFuture()
-                 .get(timeoutMs, TimeUnit.MILLISECONDS)
-         } catch (e: Exception) {
-             logger.warning("Sync batch failed [$sql]: ${e.message}")
-             JsonArray()
-         }
-     }
+    fun executeQuerySync(sql: String, params: JsonArray = JsonArray(), timeoutMs: Long = 1000): JsonArray {
+        return try {
+            executeQuery(sql, params)
+                .toCompletionStage()
+                .toCompletableFuture()
+                .get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: Exception) {
+            logger.warning("Sync query failed [$sql]: ${e.cause?.message ?: e.message ?: e.toString()}")
+            JsonArray()
+        }
+    }
+
+    fun executeUpdateSync(sql: String, params: JsonArray = JsonArray(), timeoutMs: Long = 1000): Int {
+        return try {
+            executeUpdate(sql, params)
+                .toCompletionStage()
+                .toCompletableFuture()
+                .get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: Exception) {
+            logger.warning("Sync update failed [$sql]: ${e.cause?.message ?: e.message ?: e.toString()}")
+            0
+        }
+    }
+
+    /**
+     * Execute batch updates (multiple statements with different parameters)
+     */
+    fun executeBatch(sql: String, batchParams: JsonArray): Future<JsonArray> {
+        val request = JsonObject()
+            .put("dbPath", dbPath)
+            .put("sql", sql)
+            .put("batchParams", batchParams)
+
+        return vertx.eventBus()
+            .request<JsonObject>(SQLiteVerticle.EB_EXECUTE_BATCH, request)
+            .map { message ->
+                val response = message.body()
+                if (response.getBoolean("success", false)) {
+                    response.getJsonArray("results", JsonArray())
+                } else {
+                    throw RuntimeException("SQL batch failed: $sql")
+                }
+            }
+    }
 
     /**
      * Initialize database with multiple SQL statements
@@ -182,9 +164,6 @@ class SQLiteClient(private val vertx: Vertx, private val dbPath: String) {
      */
     @Synchronized
     fun executeQueryDirect(sql: String, params: JsonArray = JsonArray()): JsonArray {
-        if (isMemoryDatabase) {
-            return executeQuerySync(sql, params)
-        }
         val results = JsonArray()
         try {
             readConnection.prepareStatement(sql).use { stmt ->

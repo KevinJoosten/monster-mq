@@ -183,8 +183,9 @@ class SQLiteVerticle : AbstractVerticle() {
                 logger.warning("SQLITE_BUSY on update (attempt $attempt/$MAX_RETRY_ATTEMPTS), retrying in ${delayMs}ms")
                 vertx.setTimer(delayMs) { handleExecuteUpdate(message, attempt + 1) }
             } else {
-                logger.severe("Error executing update: ${e.message}")
-                message.fail(500, e.message)
+                val errMsg = e.message ?: "${e.javaClass.simpleName} (no message)"
+                logger.severe("Error executing update: $errMsg")
+                message.fail(500, errMsg)
             }
         }
     }
@@ -256,8 +257,9 @@ class SQLiteVerticle : AbstractVerticle() {
             
             message.reply(JsonObject().put("success", true).put("results", results))
         } catch (e: Exception) {
-            logger.severe("Error executing query: ${e.message}")
-            message.fail(500, e.message)
+            val errMsg = e.message ?: "${e.javaClass.simpleName} (no message)"
+            logger.severe("Error executing query: $errMsg")
+            message.fail(500, errMsg)
         }
     }
     
@@ -316,8 +318,9 @@ class SQLiteVerticle : AbstractVerticle() {
                 logger.warning("SQLITE_BUSY on batch (attempt $attempt/$MAX_RETRY_ATTEMPTS), retrying in ${delayMs}ms")
                 vertx.setTimer(delayMs) { handleExecuteBatch(message, attempt + 1) }
             } else {
-                logger.severe("Error executing batch: ${e.message}")
-                message.fail(500, e.message)
+                val errMsg = e.message ?: "${e.javaClass.simpleName} (no message)"
+                logger.severe("Error executing batch: $errMsg")
+                message.fail(500, errMsg)
             }
         }
     }

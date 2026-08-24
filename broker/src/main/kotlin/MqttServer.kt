@@ -7,6 +7,8 @@ import io.vertx.core.Promise
 import io.vertx.core.net.JksOptions
 import io.vertx.core.net.KeyCertOptions
 import io.vertx.core.net.PfxOptions
+import java.util.logging.Level
+import java.util.logging.Logger as JulLogger
 
 import io.vertx.mqtt.MqttServer
 import io.vertx.mqtt.MqttServerOptions
@@ -41,6 +43,10 @@ class MqttServer(
 
 
     override fun start(startPromise: Promise<Void>) {
+        if (useWebSocket) {
+            installWebSocketPathFilter()
+        }
+
         val mqttServer: MqttServer = MqttServer.create(vertx, options)
 
         mqttServer.exceptionHandler { err ->
@@ -84,6 +90,34 @@ class MqttServer(
     }
 
     companion object {
+        private val log = Utils.getLogger(MqttServer::class.java)
+        @Volatile private var wsPathFilterInstalled = false
+
+        /**
+         * Installs a JUL filter on the Netty DefaultChannelPipeline logger (once, for all WS/WSS
+         * instances) to suppress the raw stack-trace that appears when a client connects to the
+         * WebSocket port without the required '/mqtt' path, replacing it with a clear warning.
+         * Background: Vert.X MQTT hardcodes the WebSocket path to '/mqtt' (MQTT spec §6).
+         */
+        @Synchronized
+        fun installWebSocketPathFilter() {
+            if (wsPathFilterInstalled) return
+            wsPathFilterInstalled = true
+            JulLogger.getLogger("io.netty.channel.DefaultChannelPipeline").filter =
+                java.util.logging.Filter { record ->
+                    if (record.level == Level.WARNING &&
+                        record.thrown?.message?.contains("HttpObjectAggregator") == true) {
+                        log.warning(
+                            "MQTT WebSocket client connected without the required '/mqtt' path " +
+                            "and was rejected. Clients must use the path '/mqtt' (e.g. ws://host:port/mqtt)"
+                        )
+                        false // suppress the original Netty stack-trace warning
+                    } else {
+                        true
+                    }
+                }
+        }
+
         fun buildKeyCertOptions(path: String, password: String, type: String): KeyCertOptions =
             when (type.uppercase()) {
                 "PKCS12", "PFX", "P12" -> PfxOptions().setPath(path).setPassword(password)
